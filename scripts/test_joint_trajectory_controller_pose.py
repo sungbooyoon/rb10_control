@@ -11,70 +11,58 @@ from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
 from tf2_ros import Buffer, TransformListener
+from rclpy.action import ActionClient
+from rclpy.duration import Duration
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from control_msgs.action import FollowJointTrajectory
 import numpy as np
 from tf_transformations import quaternion_matrix
 
 # ===== IKPy =====
 from ikpy.chain import Chain
 
-# === 사용 환경에 맞게 필요하면 수정 ===
-CONTROLLER_CMD_TOPIC = "/position_controllers/commands"   # JointGroupPositionController 입력
-JOINT_STATES_TOPIC   = "/rbpodo/joint_states"             # launch에서 remap한 joint_states
-PUBLISH_RATE_HZ      = 30
-BASE_LINK  = "link0"  # URDF상의 base 링크명
-EE_LINK    = "tcp"    # URDF상의 EE 링크명 (tool0, tcp 등 프로젝트에 맞게)
-DELTA_XYZ  = (0.02, 0.02, 0.02)  # EE를 소폭 이동할 거리(m): (dx, dy, dz)
-HOLD_SEC   = 1.0
-JOINT_NAMES = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]  # 컨트롤러가 기대하는 순서
+JOINT_TRAJ_ACTION = "/joint_trajectory_controller/follow_joint_trajectory"
+JOINT_STATES_TOPIC = "/rbpodo/joint_states"
+PUBLISH_RATE_HZ = 30
+BASE_LINK = "link0"
+EE_LINK = "tcp"
+DELTA_XYZ = (0.02, 0.02, 0.02)
+HOLD_SEC = 1.0
+JOINT_NAMES = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]
 
 URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb10_1300e_u.urdf"
 
-# IKPy 체인 구성 옵션
-#   - IKPy는 종종 base용 가상 조인트/링크(고정)가 포함됩니다.
-#   - active_links_mask 길이는 체인의 링크 수와 같아야 합니다.
-#     아래는 예시(mask를 모르면 None으로 두세요 → 모든 구동 조인트 사용)
-ACTIVE_LINKS_MASK = None
-BASE_ELEMENTS = [BASE_LINK]  # 이걸로 base를 지정하면 체인 구성 안정적
+ACTIVE_LINKS_MASK = [False, True, True, True, True, True, True, False]
+BASE_ELEMENTS = [BASE_LINK]
 
-# 안전 가드: IK 해가 seed(현재 관절)에서 너무 멀리 튀면 실행하지 않음
-MAX_STEP_PER_JOINT_RAD = 0.15   # 각 조인트 당 허용 최대 변화량 (rad) ≈ 8.6°
-MAX_STEP_L2_RAD        = 0.40   # 전체 변화량의 L2 노름 상한 (rad)
+MAX_STEP_PER_JOINT_RAD = 0.15
+MAX_STEP_L2_RAD = 0.40
 
-# IKPy 튜닝(필요 시)
 IK_MAX_ITER = 50
 
 
-class PositionControllerTester(Node):
+class JointTrajectoryControllerTester(Node):
     def __init__(self):
         super().__init__("position_controller_tester")
-
-        self.cmd_pub = self.create_publisher(Float64MultiArray, CONTROLLER_CMD_TOPIC, 10)
         self.joint_sub = self.create_subscription(JointState, JOINT_STATES_TOPIC, self._joint_cb, 10)
-
-        # TF 초기화
         self.tf_buf = Buffer()
         self.tf_listener = TransformListener(self.tf_buf, self)
-
-        # === IKPy 체인 구성 ===
+        self.traj_action = ActionClient(self, FollowJointTrajectory, JOINT_TRAJ_ACTION)
+        self.get_logger().info(f"Waiting for JointTrajectory action server at {JOINT_TRAJ_ACTION} ...")
+        self.traj_action.wait_for_server(timeout_sec=3.0)
         self.chain_full = Chain.from_urdf_file(
             URDF_PATH,
-            base_elements=BASE_ELEMENTS,
-            active_links_mask=ACTIVE_LINKS_MASK
+            base_elements=BASE_ELEMENTS
         )
-        self.reduced_chain = Chain(name="rb10_reduced", links=[
-            l for (l, active) in zip(self.chain_full.links, [False, True, True, True, True, True, True, False]) if active
+        self.chain = Chain(name="rb10_reduced", links=[
+            l for (l, active) in zip(self.chain_full.links, ACTIVE_LINKS_MASK) if active
         ])
-
-        self.chain = self.reduced_chain
-
         self._latest_positions: Optional[List[float]] = None
         self._joint_index_map = None
-
         self.get_logger().info("Waiting for first JointState...")
         end = time.time() + 5.0
         while rclpy.ok() and time.time() < end and self._latest_positions is None:
             rclpy.spin_once(self, timeout_sec=0.1)
-
         if self._latest_positions is None:
             self.get_logger().warn("No joint_states received. "
                                    "실로봇/시뮬레이터가 joint_states를 내보내고 있는지 확인하세요.")
@@ -104,7 +92,6 @@ class PositionControllerTester(Node):
             self.get_logger().warn("joint_states 미수신 — FK 불가")
             return None
         try:
-            # IKPy는 4x4 homogeneous matrix 반환
             T = self.chain.forward_kinematics(self._latest_positions)
             return np.asarray(T, dtype=float)
         except Exception as e:
@@ -121,9 +108,7 @@ class PositionControllerTester(Node):
 
     def ik_from_T(self, T_target: np.ndarray, seed: np.ndarray | List[float],
                    enforce_guard: bool = True) -> Optional[np.ndarray]:
-        """IKPy inverse — 4x4 변환행렬 입력"""
         try:
-            # orientation_weight로 회전 중요도 조절
             q = self.chain.inverse_kinematics_frame(
                 T_target,
                 initial_position=np.asarray(seed, dtype=float),
@@ -132,12 +117,9 @@ class PositionControllerTester(Node):
         except Exception as e:
             self.get_logger().warn(f"IKPy inverse 실패: {e}")
             return None
-
         if q is None or len(q) != len(JOINT_NAMES):
             return None
-
         q = np.asarray(q, dtype=float)
-
         if enforce_guard:
             diffs = self._angle_diff_matrix(q.reshape(1, -1), np.asarray(seed, dtype=float)).reshape(-1)
             l2 = float(np.linalg.norm(diffs))
@@ -147,7 +129,6 @@ class PositionControllerTester(Node):
                     f"max|Δ|={np.max(np.abs(diffs)):.3f} rad, ||Δ||2={l2:.3f} rad"
                 )
                 return None
-
         return q
 
     def ik_from_pose(self, pose: PoseStamped, seed: np.ndarray | List[float],
@@ -194,22 +175,57 @@ class PositionControllerTester(Node):
             MAX_STEP_L2_RAD = float(max_l2_rad)
         self.get_logger().info(f"Safety limits -> per_joint={MAX_STEP_PER_JOINT_RAD:.3f} rad, L2={MAX_STEP_L2_RAD:.3f} rad")
 
+    def send_trajectory(self, q_start: List[float], q_goal: List[float], duration: float = 0.6) -> bool:
+        """
+        Send a simple 2-point trajectory (current -> goal) to JointTrajectoryController via FollowJointTrajectory action.
+        duration: seconds from start for the goal point.
+        """
+        if self.traj_action is None or not self.traj_action.server_is_ready():
+            self.get_logger().warn("JointTrajectory action server not ready. Is joint_trajectory_controller active?")
+            return False
+
+        traj = JointTrajectory()
+        traj.joint_names = JOINT_NAMES
+
+        p0 = JointTrajectoryPoint()
+        p0.positions = list(q_start)
+        p0.time_from_start = Duration(seconds=0.0).to_msg()
+
+        p1 = JointTrajectoryPoint()
+        p1.positions = list(q_goal)
+        p1.time_from_start = Duration(seconds=float(max(0.2, duration))).to_msg()
+
+        traj.points = [p0, p1]
+
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = traj
+
+        send_future = self.traj_action.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, send_future)
+        goal_handle = send_future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            self.get_logger().warn("Trajectory goal rejected by controller.")
+            return False
+
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future)
+        result = result_future.result()
+        ok = (result is not None and getattr(result.result, "error_code", 0) == 0)
+        if ok:
+            self.get_logger().info("Trajectory execution succeeded.")
+        else:
+            self.get_logger().warn(f"Trajectory execution finished with error_code={getattr(result.result, 'error_code', None)}")
+        return ok
+
     def command_joints(self, q_cmd: List[float], hold_sec: float = 0.2, rate_hz: int = PUBLISH_RATE_HZ):
-        """관절각 명령을 일정 시간 동안 주기적으로 송신 (wall-clock 기반, sim_time 영향 없음)"""
-        msg = Float64MultiArray(); msg.data = list(q_cmd)
-        period = 1.0 / float(rate_hz)
-        t_end  = time.monotonic() + hold_sec
-        next_t = time.monotonic()
-
-        while rclpy.ok() and time.monotonic() < t_end:
-            self.cmd_pub.publish(msg)
-            rclpy.spin_once(self, timeout_sec=0.0)
-
-            next_t += period
-            sleep = next_t - time.monotonic()
-            if sleep > 0:
-                time.sleep(sleep)
-
+        """
+        Use JointTrajectoryController to move to q_cmd over hold_sec seconds.
+        rate_hz is ignored (kept for API compatibility).
+        """
+        if self._latest_positions is None:
+            self.get_logger().warn("joint_states 미수신 — 현재 관절각을 알 수 없습니다.")
+            return
+        self.send_trajectory(self._latest_positions, q_cmd, duration=max(hold_sec, 0.3))
 
     def move_to_pose(self, target_pose: PoseStamped, hold_sec: float = 0.3, enforce_guard: bool = True) -> bool:
         if self._latest_positions is None:
@@ -218,7 +234,7 @@ class PositionControllerTester(Node):
         q = self.ik_from_pose(target_pose, seed=self._latest_positions, enforce_guard=enforce_guard)
         if q is None:
             return False
-        self.command_joints(q.tolist(), hold_sec=hold_sec)
+        self.send_trajectory(self._latest_positions, q.tolist(), duration=max(hold_sec, 0.3))
         return True
 
     def move_to_T(self, T_target: np.ndarray, hold_sec: float = 0.3, enforce_guard: bool = True) -> bool:
@@ -228,7 +244,7 @@ class PositionControllerTester(Node):
         q = self.ik_from_T(T_target, seed=self._latest_positions, enforce_guard=enforce_guard)
         if q is None:
             return False
-        self.command_joints(q.tolist(), hold_sec=hold_sec)
+        self.send_trajectory(self._latest_positions, q.tolist(), duration=max(hold_sec, 0.3))
         return True
 
     def move_ee_small_delta_with_ikpy(self, dx: float, dy: float, dz: float, hold_sec: float):
@@ -253,12 +269,8 @@ class PositionControllerTester(Node):
         self._log_fk_pose(q_sel.tolist(), label="ik_solution")
 
         self.get_logger().info(f"EE Δ=({dx:.3f},{dy:.3f},{dz:.3f}) → q_cmd={[f'{v:.3f}' for v in q_sel.tolist()]}")
-        self.command_joints(q_sel.tolist(), hold_sec=hold_sec)
+        self.send_trajectory(self._latest_positions, q_sel.tolist(), duration=max(hold_sec, 0.3))
 
-    def send_positions(self, positions: List[float]):
-        msg = Float64MultiArray()
-        msg.data = positions
-        self.cmd_pub.publish(msg)
 
     def move_ee_to_position(self, x: float, y: float, z: float,
                             hold_sec: float = 0.3,
@@ -313,17 +325,16 @@ class PositionControllerTester(Node):
         self._log_fk_pose(self._latest_positions, label="current")
         self._log_fk_pose(q.tolist(), label="ik_solution(target_abs)")
 
-        self.command_joints(q.tolist(), hold_sec=hold_sec)
+        self.send_trajectory(self._latest_positions, q.tolist(), duration=max(hold_sec, 0.3))
         return True
 
 
 def main():
     rclpy.init()
-    node = PositionControllerTester()
+    node = JointTrajectoryControllerTester()
     try:
         node.move_ee_to_position(0.85, 0.20, 0.55, hold_sec=HOLD_SEC, keep_current_orientation=True, enforce_guard=False)
-        # node.move_ee_small_delta_with_ikpy(*DELTA_XYZ, hold_sec=HOLD_SEC)
-        node.get_logger().info("Done. You should have seen simple step motions via position controller (IKPy).")
+        node.get_logger().info("Done. You should have seen simple step motions via joint trajectory controller (IKPy).")
     finally:
         node.destroy_node()
         rclpy.shutdown()
