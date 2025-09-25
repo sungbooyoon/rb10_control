@@ -29,9 +29,6 @@ JOINT_NAMES = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]  # 컨
 URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb10_1300e_u.urdf"
 
 # IKPy 체인 구성 옵션
-#   - IKPy는 종종 base용 가상 조인트/링크(고정)가 포함됩니다.
-#   - active_links_mask 길이는 체인의 링크 수와 같아야 합니다.
-#     아래는 예시(mask를 모르면 None으로 두세요 → 모든 구동 조인트 사용)
 ACTIVE_LINKS_MASK = [False, True, True, True, True, True, True, False]
 BASE_ELEMENTS = [BASE_LINK]  # 이걸로 base를 지정하면 체인 구성 안정적
 
