@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import math
 import time
 from typing import List, Optional
 
@@ -252,10 +251,6 @@ class PositionControllerTester(Node):
         self.get_logger().info(f"EE Δ=({dx:.3f},{dy:.3f},{dz:.3f}) → q_cmd={[f'{v:.3f}' for v in q_sel.tolist()]}")
         self.command_joints(q_sel.tolist(), hold_sec=hold_sec)
 
-    def send_positions(self, positions: List[float]):
-        msg = Float64MultiArray()
-        msg.data = positions
-        self.cmd_pub.publish(msg)
 
     def move_ee_to_position(self, x: float, y: float, z: float,
                             hold_sec: float = 0.3,
@@ -318,7 +313,6 @@ def main():
     rclpy.init()
     node = PositionControllerTester()
     try:
-        # node.move_ee_to_position(0.85, 0.20, 0.55, hold_sec=HOLD_SEC, keep_current_orientation=True, enforce_guard=False)
         node.move_ee_small_delta_with_ikpy(*DELTA_XYZ, hold_sec=HOLD_SEC)
         node.get_logger().info("Done. You should have seen simple step motions via position controller (IKPy).")
     finally:
