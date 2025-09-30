@@ -40,16 +40,30 @@ MAX_STEP_L2_RAD = 0.40
 
 IK_MAX_ITER = 50
 
+# ===== Controller I/O mode =====
+# If True, use FollowJointTrajectory Action (current default)
+# If False, publish directly to the controller's topic (no feedback/result)
+USE_JTC_ACTION = False
+JTC_TOPIC = "/joint_trajectory_controller/joint_trajectory"
+# Single-point trajectory in topic mode: controller will start from current state
+USE_SINGLE_POINT_TRAJ = True
+
 
 class JointTrajectoryControllerTester(Node):
     def __init__(self):
-        super().__init__("position_controller_tester")
+        super().__init__("joint_trajectory_controller_tester")
         self.joint_sub = self.create_subscription(JointState, JOINT_STATES_TOPIC, self._joint_cb, 10)
         self.tf_buf = Buffer()
         self.tf_listener = TransformListener(self.tf_buf, self)
-        self.traj_action = ActionClient(self, FollowJointTrajectory, JOINT_TRAJ_ACTION)
-        self.get_logger().info(f"Waiting for JointTrajectory action server at {JOINT_TRAJ_ACTION} ...")
-        self.traj_action.wait_for_server(timeout_sec=3.0)
+        # I/O to JointTrajectoryController
+        self.traj_pub = self.create_publisher(JointTrajectory, JTC_TOPIC, 10)
+        if USE_JTC_ACTION:
+            self.traj_action = ActionClient(self, FollowJointTrajectory, JOINT_TRAJ_ACTION)
+            self.get_logger().info(f"Waiting for JointTrajectory action server at {JOINT_TRAJ_ACTION} ...")
+            self.traj_action.wait_for_server(timeout_sec=3.0)
+        else:
+            self.traj_action = None
+            self.get_logger().info(f"Using topic-based control: publishing JointTrajectory to {JTC_TOPIC}")
         self.chain_full = Chain.from_urdf_file(
             URDF_PATH,
             base_elements=BASE_ELEMENTS
@@ -177,13 +191,11 @@ class JointTrajectoryControllerTester(Node):
 
     def send_trajectory(self, q_start: List[float], q_goal: List[float], duration: float = 0.6) -> bool:
         """
-        Send a simple 2-point trajectory (current -> goal) to JointTrajectoryController via FollowJointTrajectory action.
+        Send a simple 2-point trajectory (current -> goal) to JointTrajectoryController.
+        If USE_JTC_ACTION is True, send via FollowJointTrajectory action and wait for the result.
+        Otherwise, publish trajectory to the topic JTC_TOPIC (fire-and-forget, no feedback).
         duration: seconds from start for the goal point.
         """
-        if self.traj_action is None or not self.traj_action.server_is_ready():
-            self.get_logger().warn("JointTrajectory action server not ready. Is joint_trajectory_controller active?")
-            return False
-
         traj = JointTrajectory()
         traj.joint_names = JOINT_NAMES
 
@@ -195,31 +207,44 @@ class JointTrajectoryControllerTester(Node):
         p1.positions = list(q_goal)
         p1.time_from_start = Duration(seconds=float(max(0.2, duration))).to_msg()
 
-        traj.points = [p0, p1]
-
-        goal = FollowJointTrajectory.Goal()
-        goal.trajectory = traj
-
-        send_future = self.traj_action.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, send_future)
-        goal_handle = send_future.result()
-        if goal_handle is None or not goal_handle.accepted:
-            self.get_logger().warn("Trajectory goal rejected by controller.")
-            return False
-
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
-        result = result_future.result()
-        ok = (result is not None and getattr(result.result, "error_code", 0) == 0)
-        if ok:
-            self.get_logger().info("Trajectory execution succeeded.")
+        # Choose fastest representation in topic mode: single-point message (controller starts from current state)
+        if not USE_JTC_ACTION and USE_SINGLE_POINT_TRAJ:
+            traj.points = [p1]
         else:
-            self.get_logger().warn(f"Trajectory execution finished with error_code={getattr(result.result, 'error_code', None)}")
-        return ok
+            traj.points = [p0, p1]
+
+        if USE_JTC_ACTION:
+            if self.traj_action is None or not self.traj_action.server_is_ready():
+                self.get_logger().warn("JointTrajectory action server not ready. Is joint_trajectory_controller active?")
+                return False
+            goal = FollowJointTrajectory.Goal()
+            goal.trajectory = traj
+            send_future = self.traj_action.send_goal_async(goal)
+            rclpy.spin_until_future_complete(self, send_future)
+            goal_handle = send_future.result()
+            if goal_handle is None or not goal_handle.accepted:
+                self.get_logger().warn("Trajectory goal rejected by controller.")
+                return False
+            result_future = goal_handle.get_result_async()
+            rclpy.spin_until_future_complete(self, result_future)
+            result = result_future.result()
+            ok = (result is not None and getattr(result.result, "error_code", 0) == 0)
+            if ok:
+                self.get_logger().info("Trajectory execution succeeded (action).")
+            else:
+                self.get_logger().warn(f"Trajectory finished with error_code={getattr(result.result, 'error_code', None)}")
+            return ok
+        else:
+            # Topic-based: publish once (controller will consume the latest message)
+            self.traj_pub.publish(traj)
+            pts = len(traj.points)
+            self.get_logger().info(f"Trajectory published to topic (points={pts}, no action feedback).")
+            return True
 
     def command_joints(self, q_cmd: List[float], hold_sec: float = 0.2, rate_hz: int = PUBLISH_RATE_HZ):
         """
         Use JointTrajectoryController to move to q_cmd over hold_sec seconds.
+        In topic mode (USE_JTC_ACTION=False) this is fire-and-forget (no feedback).
         rate_hz is ignored (kept for API compatibility).
         """
         if self._latest_positions is None:
@@ -334,7 +359,24 @@ def main():
     node = JointTrajectoryControllerTester()
     try:
         node.move_ee_to_position(0.85, 0.20, 0.55, hold_sec=HOLD_SEC, keep_current_orientation=True, enforce_guard=False)
-        node.get_logger().info("Done. You should have seen simple step motions via joint trajectory controller (IKPy).")
+        node.get_logger().info("Done. A 2-point trajectory was sent to JointTrajectoryController (IKPy).")
+        
+        # rate_hz = 30.0
+        # period = 1.0 / rate_hz
+        # node.get_logger().info(f"Starting main loop at {rate_hz:.1f} Hz (period={period*1000:.1f} ms)")
+        # start_time = time.time()
+        # loop_count = 0
+        # while rclpy.ok() and loop_count < 100:
+        #     t0 = time.time()
+        #     node.move_ee_to_position(0.85, 0.20, 0.55, hold_sec=HOLD_SEC, keep_current_orientation=True, enforce_guard=False)
+        #     t1 = time.time()
+        #     loop_dt = t1 - t0
+        #     node.get_logger().info(f"Loop {loop_count}: dt={loop_dt*1000:.1f} ms")
+        #     sleep_time = period - (time.time() - t0)
+        #     if sleep_time > 0:
+        #         time.sleep(sleep_time)
+        #     loop_count += 1
+
     finally:
         node.destroy_node()
         rclpy.shutdown()
