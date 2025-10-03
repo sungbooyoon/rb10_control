@@ -358,25 +358,54 @@ def main():
     rclpy.init()
     node = JointTrajectoryControllerTester()
     try:
-        node.move_ee_to_position(0.85, 0.20, 0.55, hold_sec=HOLD_SEC, keep_current_orientation=True, enforce_guard=False)
-        node.get_logger().info("Done. A 2-point trajectory was sent to JointTrajectoryController (IKPy).")
+        # node.move_ee_to_position(0.85, 0.20, 0.55, hold_sec=HOLD_SEC, keep_current_orientation=True, enforce_guard=False)
+        # node.get_logger().info("Done. A 2-point trajectory was sent to JointTrajectoryController (IKPy).")
         
-        # rate_hz = 30.0
-        # period = 1.0 / rate_hz
-        # node.get_logger().info(f"Starting main loop at {rate_hz:.1f} Hz (period={period*1000:.1f} ms)")
-        # start_time = time.time()
-        # loop_count = 0
-        # while rclpy.ok() and loop_count < 100:
-        #     t0 = time.time()
-        #     node.move_ee_to_position(0.85, 0.20, 0.55, hold_sec=HOLD_SEC, keep_current_orientation=True, enforce_guard=False)
-        #     t1 = time.time()
-        #     loop_dt = t1 - t0
-        #     node.get_logger().info(f"Loop {loop_count}: dt={loop_dt*1000:.1f} ms")
-        #     sleep_time = period - (time.time() - t0)
-        #     if sleep_time > 0:
-        #         time.sleep(sleep_time)
-        #     loop_count += 1
+        # 스트리밍 설정
+        rate_hz = 30.0
+        period = 1.0 / rate_hz
+        node.get_logger().info(f"Starting teleop-like target stream at {rate_hz:.1f} Hz")
 
+        # 기본 타겟 (기준점)
+        x0, y0, z0 = 0.85, 0.10, 0.55
+
+        # 미세 진동(±2 cm) — 텔레옵 입력이 계속 변하는 것처럼
+        amp_x, amp_y = 0.02, 0.02     # [m], 진폭
+        freq_x, freq_y = 0.25, 0.31   # [Hz], 각 축 주파수(서로 다르게 줘서 패턴 겹침 방지)
+
+        # 너무 급하게 끌면 컨트롤러 가속이 커지니 duration은 작되 0.25s 이상 권장
+        hold_sec = 0.25
+
+        t0 = time.time()
+        loop_count = 0
+        while rclpy.ok():
+            t = time.time() - t0
+
+            # (x, y)는 사인/코사인으로 천천히 변경, z는 고정 (원하면 z에도 소폭 진동 추가)
+            x = x0 + amp_x * math.sin(2.0 * math.pi * freq_x * t)
+            y = y0 + amp_y * math.cos(2.0 * math.pi * freq_y * t)
+            z = z0
+
+            t_call = time.time()
+            ok = node.move_ee_to_position(
+                x, y, z,
+                hold_sec=hold_sec,
+                keep_current_orientation=True,
+                enforce_guard=True  # 스트리밍 중엔 가드가 너무 보수적이면 자주 취소되므로 끔
+            )
+            t_done = time.time()
+            node.get_logger().info(
+                f"#{loop_count:04d} sent target=({x:.3f}, {y:.3f}, {z:.3f}), "
+                f"dt={ (t_done - t_call)*1000:.1f} ms, ok={ok}"
+            )
+
+            # 주기 맞추기
+            sleep_time = period - (time.time() - t_call)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+            loop_count += 1
+            
     finally:
         node.destroy_node()
         rclpy.shutdown()
