@@ -21,7 +21,7 @@ from ikpy.chain import Chain
 
 # ---------------- Config ----------------
 JTC_TOPIC = "/joint_trajectory_controller/joint_trajectory"
-JOINT_STATES_TOPIC = "/rbpodo/joint_states"
+JOINT_STATES_TOPIC = "/joint_states"
 PUBLISH_RATE_HZ = 30
 
 BASE_LINK = "link0"
