@@ -7,6 +7,10 @@ import time, threading, numpy as np
 from tf_transformations import quaternion_from_euler, quaternion_multiply, quaternion_matrix
 import rclpy
 
+
+MAX_V_TRANSL = 0.25   # m/s   (0.20~0.30 권장)
+MAX_W_ROT    = 0.8    # rad/s (0.5~1.0 권장)
+
 def _normalize_quat(q):
     q = np.asarray(q, dtype=float)
     n = np.linalg.norm(q)
@@ -15,8 +19,8 @@ def _normalize_quat(q):
 class TeleopRunner:
     def __init__(self, controller, agent,
                  rate_hz=30.0, traj_duration=0.25, enforce_guard=True,
-                 max_dxyz_per_tick=0.01,      # 1 cm/tick
-                 max_drot_per_axis=0.2,        # 0.2 rad/axis/tick
+                 max_dxyz_per_tick=None,      # 1 cm/tick
+                 max_drot_per_axis=None,        # 0.2 rad/axis/tick
                  drot_deadband=1e-3,           # 너무 작은 회전 무시
                  delta_in='tool',              # 'tool' or 'base'
                  verbose=False):
@@ -25,8 +29,8 @@ class TeleopRunner:
         self.period = 1.0 / float(rate_hz)
         self.traj_duration = float(traj_duration)
         self.enforce_guard = bool(enforce_guard)
-        self.max_dxyz = float(max_dxyz_per_tick)
-        self.max_drot = float(max_drot_per_axis)
+        self.max_dxyz = (MAX_V_TRANSL * self.period) if max_dxyz_per_tick is None else float(max_dxyz_per_tick)
+        self.max_drot = (MAX_W_ROT * self.period) if max_drot_per_axis  is None else float(max_drot_per_axis)
         self.deadband = float(drot_deadband)
         self.delta_in = delta_in  # 입력 델타의 기준 프레임
         self.verbose = verbose
@@ -110,7 +114,7 @@ def main():
     ctrl = RB10Controller()
     agent = SpacemouseAgent(
         SpacemouseConfig(
-            translation_scale=0.06,
+            translation_scale=0.12,
             angle_scale=0.24,
         ),
         device_path=None,
@@ -118,7 +122,7 @@ def main():
     )
     runner = TeleopRunner(ctrl, agent,
                           rate_hz=30.0,
-                          traj_duration=0.25,
+                          traj_duration=0.08, # 보통 traj_duration ≈ 2 × period ~ 3 × period 가 안정적입니다.
                           enforce_guard=True,
                           delta_in='tool',      # 스페이스마우스가 EE 로컬 델타일 때
                           verbose=False)
