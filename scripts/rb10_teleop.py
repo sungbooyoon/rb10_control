@@ -8,8 +8,8 @@ from tf_transformations import quaternion_from_euler, quaternion_multiply, quate
 import rclpy
 
 
-MAX_V_TRANSL = 0.25   # m/s   (0.20~0.30 권장)
-MAX_W_ROT    = 0.8    # rad/s (0.5~1.0 권장)
+MAX_V_TRANSL = 0.5   # m/s   (0.20~0.30 권장)
+MAX_W_ROT    = 1.2    # rad/s (0.5~1.0 권장)
 
 def _normalize_quat(q):
     q = np.asarray(q, dtype=float)
@@ -114,8 +114,8 @@ def main():
     ctrl = RB10Controller()
     agent = SpacemouseAgent(
         SpacemouseConfig(
-            translation_scale=0.12,
-            angle_scale=0.24,
+            translation_scale=0.6,
+            angle_scale=1.2,
         ),
         device_path=None,
         verbose=False
@@ -124,7 +124,7 @@ def main():
                           rate_hz=30.0,
                           traj_duration=0.08, # 보통 traj_duration ≈ 2 × period ~ 3 × period 가 안정적입니다.
                           enforce_guard=True,
-                          delta_in='tool',      # 스페이스마우스가 EE 로컬 델타일 때
+                          delta_in='base',      # 스페이스마우스가 EE 로컬 델타일 때
                           verbose=False)
 
     try:

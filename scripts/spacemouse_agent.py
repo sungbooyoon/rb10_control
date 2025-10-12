@@ -18,7 +18,7 @@ except Exception:
 class SpacemouseConfig:
     # 스케일
     translation_scale: float = 0.06   # m per full deflection
-    angle_scale: float = 0.24         # rad per full deflection (소회전 크기)
+    angle_scale: float = 0.12         # rad per full deflection (소회전 크기)
     # 데드존/감쇠
     deadzone: float = 0.10
     snap_zero_below: float = 0.60     # 0.60 미만은 0으로 스냅(노이즈 컷)
