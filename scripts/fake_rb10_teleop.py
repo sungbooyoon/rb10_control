@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from scripts.rb10_controller_analytic import RB10Controller
+from rb10_controller import RB10Controller
 from fake_spacemouse_agent import FakeSpacemouseAgent
 import time, threading, numpy as np
 from tf_transformations import quaternion_from_euler, quaternion_multiply

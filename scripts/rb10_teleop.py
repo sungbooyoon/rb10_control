@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from spacemouse_agent import SpacemouseAgent, SpacemouseConfig
-from scripts.rb10_controller_analytic import RB10Controller
+from rb10_controller import RB10Controller
 import time, threading, numpy as np
 from tf_transformations import quaternion_from_euler, quaternion_multiply, quaternion_matrix
 import rclpy
