@@ -15,6 +15,31 @@ from tf2_ros import Buffer, TransformListener
 from tf_transformations import quaternion_matrix, quaternion_from_matrix
 from ikpy.chain import Chain
 
+# ---------------- Quaternion to ZYX Euler Helper ----------------
+def _quat_xyzw_to_zyx_rad(q_xyzw: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Convert quaternion [x, y, z, w] to ZYX Euler angles [rx, ry, rz] in radians,
+    consistent with R = Rz * Ry * Rx.
+    """
+    R = quaternion_matrix(q_xyzw)[:3, :3]
+    # Clamp to avoid numerical issues
+    def clamp(x, lo=-1.0, hi=1.0):
+        return max(lo, min(hi, x))
+    # For R = Rz(ψ) * Ry(θ) * Rx(φ):
+    # θ = asin(-R[2,0]), φ = atan2(R[2,1], R[2,2]), ψ = atan2(R[1,0], R[0,0])
+    sy = -R[2, 0]
+    sy = clamp(sy)
+    ry = float(np.arcsin(sy))
+    # Check for gimbal lock (|cos(ry)| ~ 0)
+    if abs(np.cos(ry)) > 1e-8:
+        rx = float(np.arctan2(R[2, 1], R[2, 2]))
+        rz = float(np.arctan2(R[1, 0], R[0, 0]))
+    else:
+        # Gimbal lock fallback: set rx = 0 and compute rz from remaining terms
+        rx = 0.0
+        rz = float(np.arctan2(-R[0, 1], R[1, 1]))
+    return rx, ry, rz
+
 # ---------------- Config ----------------
 JTC_TOPIC = "/joint_trajectory_controller/joint_trajectory"
 JOINT_STATES_TOPIC = "/joint_states"
@@ -34,6 +59,7 @@ ACTIVE_LINKS_MASK = [False, True, True, True, True, True, True, False]
 MAX_STEP_PER_JOINT_RAD = 0.15
 MAX_STEP_L2_RAD        = 0.40
 IK_MAX_ITER            = 80
+
 
 # 로그 토글
 DEBUG = False
@@ -68,6 +94,10 @@ class RB10Controller(Node):
             self._idx6 = np.array([self._name2idx[n] for n in JOINT_NAMES], dtype=int)
         except KeyError as e:
             raise RuntimeError(f"URDF/IKPy 체인에 '{e.args[0]}' 조인트가 없습니다. JOINT_NAMES/URDF를 맞춰주세요.")
+
+        # 디버그: EE가 tcp인지 1회만 확인
+        if DEBUG:
+            self.get_logger().info(f"EE (last link) = {self.chain.links[-1].name}")
 
         # 최신 JointState(6개, JOINT_NAMES 순서 저장)
         self._latest_positions: Optional[np.ndarray] = None
@@ -159,37 +189,18 @@ class RB10Controller(Node):
         # IKPy가 요구하는 절대 referential 3x3 회전 행렬
         R_tgt = quaternion_matrix(q)[:3, :3]
 
-        # seed는 full 벡터
-        seed_full = self._q_full_from_q6(self._latest_positions)
-
-        # 위치(3,) + 절대 R(3x3)으로 직접 IK (가장 빠르고 깔끔)
+        # --- Analytic IK (RB10-1300) ---
         try:
-            q_full = self.chain.inverse_kinematics(
-                target_position=p.tolist(),
-                target_orientation=R_tgt.tolist(),
-                initial_position=seed_full,
-                max_iter=IK_MAX_ITER,
-                orientation_mode="all"
-            )
-        except Exception as e:
-            self.get_logger().warn(f"IKPy inverse 실패: {e}")
+            from analytic_ik import ik_rb10_1300  # expects pos[m], rot[rad] (ZYX)
+        except ImportError:
+            self.get_logger().error("analytic_ik.py not found or import failed — analytic IK is required.")
             return None
-
-        if q_full is None or len(q_full) != len(self._link_names):
-            return None
-
-        q6 = self._q6_from_q_full(np.asarray(q_full, dtype=float))
+        rx, ry, rz = _quat_xyzw_to_zyx_rad(q)
+        # Analytic solver returns degrees; convert to radians for controllers
+        th_deg = ik_rb10_1300(p.tolist(), [rx, ry, rz])
+        q6 = np.deg2rad(np.asarray(th_deg, dtype=float))
         if enforce_guard and not self._guard_ok(q6, self._latest_positions):
             return None
-
-        if DEBUG:
-            # 검증(선택): ori err
-            T_sol = self._fk_current_T_of(q6)
-            if T_sol is not None:
-                R_sol = T_sol[:3, :3]
-                theta = math.acos(max(-1.0, min(1.0, (np.trace(R_sol.T @ R_tgt) - 1) / 2)))
-                self.get_logger().info(f"ori_err_rad={theta:.6f}")
-
         return q6
 
     # FK 검증용(선택적) — DEBUG 시에만 사용
