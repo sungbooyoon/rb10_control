@@ -74,7 +74,7 @@ def main():
     ctrl = RB10Controller()
 
     # 원 궤적 + 약간의 yaw 흔들림
-    agent = FakeSpacemouseAgent(traj='line', rate_hz=60.0,
+    agent = FakeSpacemouseAgent(traj='circle', rate_hz=60.0,
                                 trans_amp=0.003, rot_amp=0.03, freq_xy=(0.6,0.4), yaw_freq=0.3)
 
     runner = TeleopRunner(ctrl, agent, rate_hz=30.0, traj_duration=0.08, enforce_guard=True,
