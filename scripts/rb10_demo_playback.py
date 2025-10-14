@@ -19,7 +19,6 @@ from rclpy.node import Node
 from rb10_controller import RB10Controller
 
 HZ = 30.0
-PERIOD = 1.0 / HZ
 
 
 def latest_npz(dirpath: str) -> str:
@@ -121,6 +120,7 @@ def main():
             input("[KEY] Press ENTER to start playback...")
             start_k = i0 + 1  # we've already moved to k=i0
 
+    rate = node.create_rate(HZ * args.speed)
     next_t = time.perf_counter()
     for k in range(start_k, i1):
         p = tcp_pos[k, :3].astype(float)  # meters
@@ -142,15 +142,7 @@ def main():
                     print(f"[WARN] publish_qpos failed at k={k}: {e}")
             else:
                 print(f"k={k}: q={np.asarray(q_rad).round(4).tolist()}")
-
-        # pacing
-        period = PERIOD / max(1e-6, args.speed)
-        next_t += period
-        sleep_dur = next_t - time.perf_counter()
-        if sleep_dur > 0:
-            time.sleep(sleep_dur)
-        else:
-            next_t = time.perf_counter()
+        rate.sleep()
 
     # cleanup
     try:

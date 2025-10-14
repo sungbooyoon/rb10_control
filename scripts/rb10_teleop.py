@@ -44,6 +44,8 @@ class TeleopRunner:
         self._th.join(timeout=2.0)
 
     def _loop(self):
+        node = self.ctrl  # Use the existing RB10Controller node for timing
+        rate = node.create_rate(1.0 / self.period)
         while not self._stop.is_set():
             t0 = time.time()
 
@@ -105,9 +107,7 @@ class TeleopRunner:
                     self.ctrl.get_logger().info(f"teleop tick ok")
 
             # 주기 유지
-            dt = self.period - (time.time() - t0)
-            if dt > 0:
-                time.sleep(dt)
+            rate.sleep()
 
 def main():
     rclpy.init()

@@ -1,5 +1,6 @@
 import time
 import rbpodo as rb
+import rclpy
 
 IP = "10.0.2.7"
 HZ = 30.0
@@ -35,13 +36,17 @@ def main():
         return
     print("[OK] first packet received.")
 
+    rclpy.init(args=None)
+    from rclpy.node import Node
+    node = Node('rb10_data_reader')
+    rate = node.create_rate(HZ)
+
     # dt는 perf_counter 기반(안정), 스탬프는 time.time 기반(공통 기준)
     prev_pc = time.perf_counter()
     prev_stamp = time.time()  # 필요하면 저장
     prev_jnt_ang = as_list(data.sdata.jnt_ang, 6)
     prev_tcp_pos = as_list(data.sdata.tcp_pos, 6)
 
-    next_t = time.perf_counter()
     while True:
         data = read_once(ch, LOOP_TIMEOUT)
         if data is None or getattr(data, "sdata", None) is None:
@@ -82,10 +87,11 @@ def main():
             prev_tcp_pos = tcp_pos
 
         # 30 Hz 주기 유지(선택)
-        next_t += PERIOD
-        sleep_dur = next_t - time.perf_counter()
-        if sleep_dur > 0: time.sleep(sleep_dur)
-        else: next_t = time.perf_counter()
+        rate.sleep()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

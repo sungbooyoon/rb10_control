@@ -13,7 +13,6 @@ from ros2topic.api import get_topic_names_and_types
 
 IP = "10.0.2.7"
 HZ = 30.0
-PERIOD = 1.0 / HZ
 FIRST_TIMEOUT = 1.0
 LOOP_TIMEOUT = 0.05
 
@@ -104,6 +103,13 @@ def main():
         cam_node = None
         print("[INFO] No camera topics found. Skipping camera recording.")
 
+    if cam_node:
+        rate = cam_node.create_rate(HZ)
+    else:
+        rclpy.init(args=None)
+        tmp_node = Node("rate_controller")
+        rate = tmp_node.create_rate(HZ)
+
     with KeyListener() as kl:
         # wait for ENTER to start
         while True:
@@ -121,8 +127,6 @@ def main():
         prev_jnt_ang = as_list(data.sdata.jnt_ang, 6)
         prev_tcp_pos = as_list(data.sdata.tcp_pos, 6)
 
-        next_t = time.perf_counter()
-
         while True:
             key = kl.get_key()
             if key == '\x1b':  # ESC
@@ -138,7 +142,7 @@ def main():
             else:
                 s = data.sdata
 
-                stamp = time.time()
+                stamp = (cam_node.get_clock().now().nanoseconds * 1e-9) if cam_node else (tmp_node.get_clock().now().nanoseconds * 1e-9)
                 now_pc = time.perf_counter()
                 dt = now_pc - prev_pc if prev_pc is not None else None
 
@@ -176,11 +180,7 @@ def main():
                 prev_jnt_ang = jnt_ang
                 prev_tcp_pos = tcp_pos
 
-            # 30 Hz pacing
-            next_t += PERIOD
-            sleep_dur = next_t - time.perf_counter()
-            if sleep_dur > 0: time.sleep(sleep_dur)
-            else: next_t = time.perf_counter()
+            rate.sleep()
 
     os.makedirs("../dataset", exist_ok=True)
     filename = f"../dataset/log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz"
@@ -211,6 +211,9 @@ def main():
 
     if cam_node:
         cam_node.destroy_node()
+        rclpy.shutdown()
+    else:
+        tmp_node.destroy_node()
         rclpy.shutdown()
 
 if __name__ == "__main__":
