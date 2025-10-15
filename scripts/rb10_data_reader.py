@@ -68,6 +68,13 @@ def main():
             tcp_vel = diff_arr(prev_tcp_pos, tcp_pos, dt)
             free_drive = int(getattr(s, "is_freedrive_mode", 0))
 
+            eft_fx = getattr(s, "eft_fx", None)
+            eft_fy = getattr(s, "eft_fy", None)
+            eft_fz = getattr(s, "eft_fz", None)
+            eft_mx = getattr(s, "eft_mx", None)
+            eft_my = getattr(s, "eft_my", None)
+            eft_mz = getattr(s, "eft_mz", None)
+
             def fmt(v):
                 if v is None: return "None"
                 return "[" + ", ".join(f"{x:.3f}" for x in v) + "]"
@@ -79,6 +86,8 @@ def main():
                 f"  tcp_pos([mm,deg])   = {fmt(tcp_pos)}\n"
                 f"  tcp_vel([mm/s,deg/s])= {fmt(tcp_vel)}"
             )
+            if eft_fx is not None:
+                print(f"  eft = {fmt([eft_fx, eft_fy, eft_fz, eft_mx, eft_my, eft_mz])}")
 
             # 업데이트
             prev_pc = now_pc

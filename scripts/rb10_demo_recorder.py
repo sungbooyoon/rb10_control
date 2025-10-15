@@ -121,6 +121,7 @@ def main():
         print("[INFO] Recording started. Logging ALL packets (with freedrive flag).")
 
         stamps, frees, jnt_angs, jnt_vels, tcp_poss, tcp_vels = [], [], [], [], [], []
+        efts = []
         frames_dict = {t: [] for t in cam_node.latest_frames.keys()} if cam_node else {}
 
         prev_pc = time.perf_counter()
@@ -170,6 +171,26 @@ def main():
                 tcp_poss.append(tcp_pos_conv)
                 tcp_vels.append(tcp_vel_conv)
 
+                # external force/torque (may be absent; fill with NaN)
+                eft_fx = getattr(s, "eft_fx", None)
+                eft_fy = getattr(s, "eft_fy", None)
+                eft_fz = getattr(s, "eft_fz", None)
+                eft_mx = getattr(s, "eft_mx", None)
+                eft_my = getattr(s, "eft_my", None)
+                eft_mz = getattr(s, "eft_mz", None)
+                eft_vec = np.array(
+                    [
+                        np.nan if eft_fx is None else float(eft_fx),
+                        np.nan if eft_fy is None else float(eft_fy),
+                        np.nan if eft_fz is None else float(eft_fz),
+                        np.nan if eft_mx is None else float(eft_mx),
+                        np.nan if eft_my is None else float(eft_my),
+                        np.nan if eft_mz is None else float(eft_mz),
+                    ],
+                    dtype=np.float64,
+                )
+                efts.append(eft_vec)
+
                 if cam_node:
                     for topic, frame in cam_node.latest_frames.items():
                         if frame is not None:
@@ -192,6 +213,7 @@ def main():
         jnt_vel=np.vstack(jnt_vels),
         tcp_pos=np.vstack(tcp_poss),
         tcp_vel=np.vstack(tcp_vels),
+        eft=np.vstack(efts),
     )
     print(f"[OK] Saved {len(stamps)} samples to {filename}")
 
