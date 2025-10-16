@@ -21,6 +21,19 @@ from rb10_controller import RB10Controller
 HZ = 30.0
 
 
+class WallRate:
+    def __init__(self, hz: float):
+        self._period = 1.0 / float(hz)
+        self._next = time.perf_counter()
+    def sleep(self):
+        self._next += self._period
+        delay = self._next - time.perf_counter()
+        if delay > 0:
+            time.sleep(delay)
+        else:
+            # 지연이 누적되면 드리프트 보정
+            self._next = time.perf_counter()
+
 def latest_npz(dirpath: str) -> str:
     files = sorted(glob.glob(os.path.join(dirpath, 'log_*.npz')))
     return files[-1] if files else None
@@ -64,7 +77,7 @@ def main():
     parser.add_argument('--end', type=int, default=None, help='End index (exclusive)')
     args = parser.parse_args()
 
-    path = args.file or latest_npz('../dataset')
+    path = args.file or latest_npz('/home/sungboo/ros2_ws/src/rb10_control/dataset')
     if not path or not os.path.isfile(path):
         print('[ERROR] No .npz demo found. Use --file PATH or record with rb10_demo_recorder.py first.')
         sys.exit(1)
@@ -89,11 +102,13 @@ def main():
     rclpy.init(args=None)
     node = Node('rb10_demo_playback')
 
+    frame_dt = 1.0 / (HZ * args.speed)
+
     # Initialize controller (adjust constructor as needed for your environment)
-    ctrl = RB10Controller(node=node)
+    ctrl = RB10Controller()
 
     start_k = i0
-
+    
     p0 = tcp_pos[i0, :3].astype(float)
     rx0, ry0, rz0 = tcp_pos[i0, 3:].astype(float)
     q0_xyzw = to_quat_xyzw_from_zyx(rx0, ry0, rz0)
@@ -120,8 +135,7 @@ def main():
             input("[KEY] Press ENTER to start playback...")
             start_k = i0 + 1  # we've already moved to k=i0
 
-    rate = node.create_rate(HZ * args.speed)
-    next_t = time.perf_counter()
+    rate = WallRate(HZ * args.speed)
     for k in range(start_k, i1):
         p = tcp_pos[k, :3].astype(float)  # meters
         rx, ry, rz = tcp_pos[k, 3:].astype(float)  # radians (ZYX convention)
@@ -137,7 +151,8 @@ def main():
             # Execute or print
             if args.execute:
                 try:
-                    ctrl.publish_qpos(np.asarray(q_rad, dtype=float).tolist(), duration=0.05)
+                    # ctrl.publish_qpos(np.asarray(q_rad, dtype=float).tolist(), duration=frame_dt)
+                    ctrl.publish_qpos(np.asarray(q_rad, dtype=float).tolist(), duration=0.1)
                 except Exception as e:
                     print(f"[WARN] publish_qpos failed at k={k}: {e}")
             else:

@@ -1,22 +1,55 @@
-import time
-import rbpodo as rb
-import sys, select, tty, termios
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import time, os, sys, select, tty, termios
 from datetime import datetime
 import numpy as np
-import os
+import cv2
+
+import rbpodo as rb
+
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-import cv2
-from ros2topic.api import get_topic_names_and_types
 
+# ===== User params =====
 IP = "10.0.2.7"
 HZ = 30.0
 FIRST_TIMEOUT = 1.0
 LOOP_TIMEOUT = 0.05
 
-SAVE_MP4 = False  # Set True to save MP4 videos, False to skip
+# ===== QoS: RealSense 호환 (BestEffort / volatile / depth 5) =====
+IMAGE_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=5,
+    durability=DurabilityPolicy.VOLATILE,
+)
+
+class WallRate:
+    def __init__(self, hz: float):
+        self._period = 1.0 / float(hz)
+        self._next = time.perf_counter()
+    def sleep(self):
+        self._next += self._period
+        delay = self._next - time.perf_counter()
+        if delay > 0:
+            time.sleep(delay)
+        else:
+            # 심하게 지연됐으면 드리프트 보정
+            self._next = time.perf_counter()
+
+def safe_rclpy_init():
+    try:
+        rclpy.init(args=None)
+    except RuntimeError:
+        # 이미 초기화된 경우
+        pass
 
 def read_once(ch, timeout):
     try:
@@ -50,29 +83,29 @@ class MultiCameraRecorder(Node):
         self.latest_frames = {}
         for t in topics:
             self.latest_frames[t] = None
-            self.create_subscription(Image, t, lambda msg, t=t: self.image_callback(msg, t), 10)
+            # RealSense 기본 QoS와 호환되도록 BestEffort
+            self.create_subscription(
+                Image, t,
+                lambda msg, t=t: self.image_callback(msg, t),
+                IMAGE_QOS
+            )
 
     def image_callback(self, msg, topic):
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
+            # OpenCV는 BGR 기대 → 바로 bgr8로 변환
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.latest_frames[topic] = frame
         except Exception as e:
             self.get_logger().warn(f"[{topic}] Image conversion failed: {e}")
 
-def detect_available_cameras():
-    try:
-        rclpy.init(args=None)
-        tmp_node = Node("camera_topic_scanner")
-        topics = [t[0] for t in get_topic_names_and_types(tmp_node, no_demangle=True) if 'image_raw' in t[0]]
-        tmp_node.destroy_node()
-        rclpy.shutdown()
-        return topics
-    except Exception as e:
-        print(f"[WARN] Failed to detect camera topics: {e}")
-        return []
-
 def main():
-    global SAVE_MP4
+    # ---------- CLI args ----------
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--enable-camera", action="store_true", help="Enable camera logging")
+    parser.add_argument("--camera-topic", action="append", default=[],
+                        help="Image topic to subscribe (repeatable). e.g., --camera-topic /camera/camera/color/image_raw")
+    parser.add_argument("--save-mp4", action="store_true", help="Save MP4 files for each topic")
+    args = parser.parse_args()
 
     ch = rb.CobotData(IP)
 
@@ -89,29 +122,19 @@ def main():
         return
     print("[OK] first packet received.")
 
+    # 카메라 노드 (옵션)
+    cam_node = None
+    if args.enable_camera and len(args.camera_topic) > 0:
+        safe_rclpy_init()
+        cam_node = MultiCameraRecorder(args.camera_topic)
+        print(f"[INFO] Camera topics: {args.camera_topic}")
+    else:
+        print("[INFO] Camera disabled or no topics provided. Skipping camera recording.")
+
+    rate = WallRate(HZ)
+
     print("Press ENTER to start recording; press ESC to stop and save (recording ALL packets).")
-
-    available_cameras = detect_available_cameras()
-    if available_cameras:
-        rclpy.init(args=None)
-        cam_node = MultiCameraRecorder(available_cameras)
-        print(f"[INFO] Found {len(available_cameras)} camera(s): {available_cameras}")
-        user_input = input("Save camera videos as MP4? (y/N): ").strip().lower()
-        SAVE_MP4 = user_input == 'y'
-        print(f"[INFO] MP4 recording {'enabled' if SAVE_MP4 else 'disabled'}.")
-    else:
-        cam_node = None
-        print("[INFO] No camera topics found. Skipping camera recording.")
-
-    if cam_node:
-        rate = cam_node.create_rate(HZ)
-    else:
-        rclpy.init(args=None)
-        tmp_node = Node("rate_controller")
-        rate = tmp_node.create_rate(HZ)
-
     with KeyListener() as kl:
-        # wait for ENTER to start
         while True:
             key = kl.get_key()
             if key == '\r' or key == '\n':
@@ -122,7 +145,7 @@ def main():
 
         stamps, frees, jnt_angs, jnt_vels, tcp_poss, tcp_vels = [], [], [], [], [], []
         efts = []
-        frames_dict = {t: [] for t in cam_node.latest_frames.keys()} if cam_node else {}
+        frames_dict = {t: [] for t in (cam_node.latest_frames.keys() if cam_node else [])}
 
         prev_pc = time.perf_counter()
         prev_jnt_ang = as_list(data.sdata.jnt_ang, 6)
@@ -135,27 +158,31 @@ def main():
                 break
 
             data = read_once(ch, LOOP_TIMEOUT)
+
             if cam_node:
                 rclpy.spin_once(cam_node, timeout_sec=0.0)
 
             if data is None or getattr(data, "sdata", None) is None:
-                print("[WARN] no packet this cycle.")
+                # print("[WARN] no packet this cycle.")
+                pass
             else:
                 s = data.sdata
 
-                stamp = (cam_node.get_clock().now().nanoseconds * 1e-9) if cam_node else (tmp_node.get_clock().now().nanoseconds * 1e-9)
+                # 공통 시간축: 벽시계(시스템 시간). RealSense도 global_time_enabled로 맞추면 거의 동일축.
+                stamp = time.time()
                 now_pc = time.perf_counter()
                 dt = now_pc - prev_pc if prev_pc is not None else None
-
+                
                 jnt_ang = as_list(s.jnt_ang, 6)
                 tcp_pos = as_list(s.tcp_pos, 6)
                 jnt_vel = diff_arr(prev_jnt_ang, jnt_ang, dt)
                 tcp_vel = diff_arr(prev_tcp_pos, tcp_pos, dt)
                 freedrive = int(getattr(s, "is_freedrive_mode", 0))
 
-                # unit conversions
+                # 단위 변환
                 jnt_ang_rad = np.deg2rad(jnt_ang).astype(np.float64)
-                jnt_vel_rad = np.deg2rad(jnt_vel).astype(np.float64) if jnt_vel is not None else np.full(6, np.nan, dtype=np.float64)
+                jnt_vel_rad = (np.deg2rad(jnt_vel).astype(np.float64)
+                               if jnt_vel is not None else np.full(6, np.float64(np.nan)))
                 tcp_pos_conv = np.empty(6, dtype=np.float64)
                 tcp_pos_conv[:3] = np.array(tcp_pos[:3], dtype=np.float64) / 1000.0
                 tcp_pos_conv[3:] = np.deg2rad(tcp_pos[3:6]).astype(np.float64)
@@ -171,72 +198,82 @@ def main():
                 tcp_poss.append(tcp_pos_conv)
                 tcp_vels.append(tcp_vel_conv)
 
-                # external force/torque (may be absent; fill with NaN)
+                # 외력/토크 (없으면 NaN)
                 eft_fx = getattr(s, "eft_fx", None)
                 eft_fy = getattr(s, "eft_fy", None)
                 eft_fz = getattr(s, "eft_fz", None)
                 eft_mx = getattr(s, "eft_mx", None)
                 eft_my = getattr(s, "eft_my", None)
                 eft_mz = getattr(s, "eft_mz", None)
-                eft_vec = np.array(
-                    [
-                        np.nan if eft_fx is None else float(eft_fx),
-                        np.nan if eft_fy is None else float(eft_fy),
-                        np.nan if eft_fz is None else float(eft_fz),
-                        np.nan if eft_mx is None else float(eft_mx),
-                        np.nan if eft_my is None else float(eft_my),
-                        np.nan if eft_mz is None else float(eft_mz),
-                    ],
-                    dtype=np.float64,
-                )
-                efts.append(eft_vec)
+                efts.append(np.array([
+                    np.nan if eft_fx is None else float(eft_fx),
+                    np.nan if eft_fy is None else float(eft_fy),
+                    np.nan if eft_fz is None else float(eft_fz),
+                    np.nan if eft_mx is None else float(eft_mx),
+                    np.nan if eft_my is None else float(eft_my),
+                    np.nan if eft_mz is None else float(eft_mz),
+                ], dtype=np.float64))
 
                 if cam_node:
                     for topic, frame in cam_node.latest_frames.items():
                         if frame is not None:
                             frames_dict[topic].append(frame.copy())
 
-                # update prevs
                 prev_pc = now_pc
                 prev_jnt_ang = jnt_ang
                 prev_tcp_pos = tcp_pos
 
             rate.sleep()
 
-    os.makedirs("../dataset", exist_ok=True)
-    filename = f"../dataset/log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz"
-    np.savez_compressed(
-        filename,
-        stamp=np.asarray(stamps, dtype=np.float64),
-        freedrive=np.asarray(frees, dtype=np.uint8),
-        jnt_ang=np.vstack(jnt_angs),
-        jnt_vel=np.vstack(jnt_vels),
-        tcp_pos=np.vstack(tcp_poss),
-        tcp_vel=np.vstack(tcp_vels),
-        eft=np.vstack(efts),
-    )
-    print(f"[OK] Saved {len(stamps)} samples to {filename}")
+    # 저장
+    if len(stamps) == 0:
+        print("[WARN] No samples captured; nothing to save.")
+    else:
+        os.makedirs("/home/sungboo/ros2_ws/src/rb10_control/dataset", exist_ok=True)
+        filename = f"/home/sungboo/ros2_ws/src/rb10_control/dataset/log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz"
+        np.savez_compressed(
+            filename,
+            stamp=np.asarray(stamps, dtype=np.float64),
+            freedrive=np.asarray(frees, dtype=np.uint8),
+            jnt_ang=np.vstack(jnt_angs),
+            jnt_vel=np.vstack(jnt_vels),
+            tcp_pos=np.vstack(tcp_poss),
+            tcp_vel=np.vstack(tcp_vels),
+            eft=np.vstack(efts),
+        )
+        print(f"[OK] Saved {len(stamps)} samples to {filename}")
 
-    if cam_node and SAVE_MP4:
-        for topic, frames in frames_dict.items():
-            if len(frames) == 0:
-                continue
-            safe_topic = topic.replace('/', '_').strip('_')
-            vid_filename = filename.replace('.npz', f'_{safe_topic}.mp4')
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            h, w, _ = frames[0].shape
-            out = cv2.VideoWriter(vid_filename, fourcc, HZ, (w, h))
-            for f in frames:
-                out.write(f)
-            out.release()
-            print(f"[OK] Saved {len(frames)} frames from {topic} to {vid_filename}")
+        if cam_node:
+            for topic, frames in frames_dict.items():
+                if len(frames) == 0:
+                    continue
+                safe_topic = topic.replace('/', '_').strip('_')
+                vid_filename = filename.replace('.npz', f'_{safe_topic}.npz')
+                np.savez_compressed(vid_filename, frames=np.stack(frames))
+                print(f"[OK] Saved {len(frames)} frames from {topic} to {vid_filename}")
+            if args.save_mp4:
+                for topic, frames in frames_dict.items():
+                    if len(frames) == 0:
+                        continue
+                    safe_topic = topic.replace('/', '_').strip('_')
+                    vid_filename = filename.replace('.npz', f'_{safe_topic}.mp4')
+                    np.savez_compressed(vid_filename, frames=np.stack(frames))
+                    print(f"[OK] Saved {len(frames)} frames from {topic} to {vid_filename}")
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    h, w, _ = frames[0].shape
+                    out = cv2.VideoWriter(vid_filename, fourcc, HZ, (w, h))
+                    for f in frames:
+                        out.write(f)  # 이미 BGR 프레임
+                    out.release()
+                    print(f"[OK] Saved {len(frames)} frames from {topic} to {vid_filename}")
 
+    # 종료 정리
     if cam_node:
         cam_node.destroy_node()
-        rclpy.shutdown()
-    else:
-        tmp_node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except RuntimeError:
+            pass
 
 if __name__ == "__main__":
     main()

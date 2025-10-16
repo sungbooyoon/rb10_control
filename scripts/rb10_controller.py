@@ -244,7 +244,7 @@ def main():
             print(node.get_current_ee_pose())
 
         # 예시: BASE 기준 목표
-        target_ee_pos = [0.6, 0.1, 0.4]
+        target_ee_pos = [0.8, 0.1, 0.2]
         target_ee_rot_xyzw = [0.7071068, 0, 0, 0.7071068]
 
         q = node.compute_target_qpos_from_pose(target_ee_pos, target_ee_rot_xyzw, enforce_guard=False)
