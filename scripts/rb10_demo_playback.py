@@ -100,12 +100,16 @@ def main():
     print(f"[INFO] Playing demo {os.path.basename(path)} | freedrive frames {i0}..{i1-1} (N={i1-i0}/{N}) | speed x{args.speed}")
 
     rclpy.init(args=None)
-    node = Node('rb10_demo_playback')
 
     frame_dt = 1.0 / (HZ * args.speed)
 
     # Initialize controller (adjust constructor as needed for your environment)
     ctrl = RB10Controller()
+
+    # executor에 ctrl을 등록
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor()
+    executor.add_node(ctrl)
 
     start_k = i0
     
@@ -121,7 +125,6 @@ def main():
                 ctrl.destroy_node()
         except Exception:
             pass
-        node.destroy_node()
         rclpy.shutdown()
         sys.exit(1)
     else:
@@ -137,6 +140,8 @@ def main():
 
     rate = WallRate(HZ * args.speed)
     for k in range(start_k, i1):
+        executor.spin_once(timeout_sec=0.0)
+
         p = tcp_pos[k, :3].astype(float)  # meters
         rx, ry, rz = tcp_pos[k, 3:].astype(float)  # radians (ZYX convention)
 
@@ -165,7 +170,6 @@ def main():
             ctrl.destroy_node()
     except Exception:
         pass
-    node.destroy_node()
     rclpy.shutdown()
 
 
