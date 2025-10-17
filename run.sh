@@ -32,7 +32,7 @@ python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
 python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_controller.py
 python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_teleop.py
 
-TODO: demo recorder - teleop input as actions
+ros2 bag record /tf /rb/joint_states /rb/tcp_pose /rb/freedrive /rb/ee_wrench /rb/teleop_delta /camera/camera/color/image_raw 
 
 python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
   --folder /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_tel_1 \
@@ -41,7 +41,9 @@ python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
 
 # 2.3 playback one demo
 ros2 launch rbpodo_moveit_config moveit.launch.py use_fake_hardware:=false
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_demo_playback.py
+python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_demo_playback.py \
+  --h5 /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5 --demo demo_0 --execute
+
 
 
 

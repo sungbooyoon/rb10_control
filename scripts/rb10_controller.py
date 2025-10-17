@@ -157,30 +157,39 @@ class RB10Controller(Node):
     # ---------- IK ----------
     def compute_target_qpos_from_pose(
         self,
-        target_ee_pos: np.ndarray,        # (3,)
-        target_ee_rot_xyzw: np.ndarray,   # (4,) xyzw (BASE 기준)
+        target_ee_pos: np.ndarray,               # (3,)
+        target_ee_rot: np.ndarray,               # (4,) [xyzw] or (3,) [ypr]
         enforce_guard: bool = True,
     ) -> Optional[np.ndarray]:
+        """
+        Compute joint angles for desired EE pose.
+
+        Args:
+            target_ee_pos: [x, y, z] in BASE frame
+            target_ee_rot: orientation (xyzw if rot_type='quat', ypr if 'ypr')
+            rot_type: 'quat' or 'ypr'
+            enforce_guard: limit joint step size
+
+        Returns:
+            q6: np.ndarray(6,) or None
+        """
         if self._latest_positions is None:
             self._ik_fail("No joint_states — IK seed unavailable")
             return None
 
-        # 입력 정규화
+        # --- normalize input ---
         p = np.asarray(target_ee_pos, dtype=float).reshape(3,)
-        q = np.asarray(target_ee_rot_xyzw, dtype=float).reshape(4,)
+
+        q = np.asarray(target_ee_rot, dtype=float).reshape(4,)
         n = float(np.linalg.norm(q))
         if not np.isfinite(n) or n <= 0:
             self._ik_fail("Invalid target quaternion (norm <= 0 or NaN)")
             return None
         q /= n
-
-        # IKPy 요구 포맷: 절대 회전 3x3
         R_tgt = quaternion_matrix(q)[:3, :3]
-
-        # seed = 현재 상태
+        
+        # --- seed & IK ---
         seed_full = self._q_full_from_q6(self._latest_positions)
-
-        # IK
         try:
             q_full = self.chain.inverse_kinematics(
                 target_position=p.tolist(),
@@ -196,24 +205,13 @@ class RB10Controller(Node):
         if q_full is None:
             self._ik_fail("IKPy returned None")
             return None
-        if len(q_full) != len(self._link_names):
-            self._ik_fail(f"IKPy length mismatch (got {len(q_full)}, expect {len(self._link_names)})")
-            return None
 
         q6 = self._q6_from_q_full(np.asarray(q_full, dtype=float))
-
         if enforce_guard and not self._guard_ok(q6, self._latest_positions):
             return None
 
-        if DEBUG:
-            # orientation error 체크
-            T_sol = self._fk_current_T_of(q6)
-            if T_sol is not None:
-                R_sol = T_sol[:3, :3]
-                theta = math.acos(max(-1.0, min(1.0, (np.trace(R_sol.T @ R_tgt) - 1) / 2)))
-                self.get_logger().info(f"ori_err_rad={theta:.6f}")
-
         return q6
+
 
     # ---------- Trajectory publish ----------
     def publish_qpos(self, q_goal: List[float], duration: float = 0.3) -> bool:
