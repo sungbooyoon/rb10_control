@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RB10 Demo Playback (robomimic HDF5)
+RB10 Demo Playback (robomimic HDF5, ee_pos+ee_quat)
 - Loads a robomimic-compatible HDF5
 - Selects a trajectory group (demo_0, demo_1, ...)
 - Each timestep:
-    - ee_pose = [x,y,z, yaw, pitch, roll]  # YPR = ZYX intrinsic (rzyx)
-    - Convert YPR -> quaternion(xyzw)
+    - Read ee_pos (x,y,z) and ee_quat (xyzw)
     - Call RB10Controller.compute_target_qpos_from_pose(pos, quat)
 - Optionally execute on the robot
 """
@@ -18,7 +17,6 @@ import argparse
 import json
 import h5py
 import numpy as np
-from tf_transformations import quaternion_from_euler
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -58,7 +56,8 @@ def parse_demo_name(demo_arg: str | int) -> str:
 def load_hdf5_demo(h5_path: str, demo_name: str):
     """
     Returns:
-        ee_pose (N, 6): [x,y,z, yaw, pitch, roll] (meters, radians; YPR=ZYX)
+        ee_pos  (N, 3): meters
+        ee_quat (N, 4): quaternion (xyzw)
         hz (float): timeline_hz from meta if present, else DEFAULT_HZ
         meta (dict): parsed json from attrs["meta"]
     """
@@ -70,19 +69,22 @@ def load_hdf5_demo(h5_path: str, demo_name: str):
             raise KeyError("HDF5 missing 'data' group")
         g_data = f["data"]
         if demo_name not in g_data:
-            # Show available demos for convenience
             demos = [k for k in g_data.keys() if k.startswith("demo_")]
             raise KeyError(f"{demo_name} not in HDF5. Available: {demos}")
         g_demo = g_data[demo_name]
 
-        # obs / ee_pose (we stored pos + YPR here)
-        if "obs" not in g_demo or "ee_pose" not in g_demo["obs"]:
-            raise KeyError(f"{demo_name}/obs/ee_pose missing")
+        if "obs" not in g_demo:
+            raise KeyError(f"{demo_name}/obs missing")
+        g_obs = g_demo["obs"]
 
-        ee_pose = np.asarray(g_demo["obs"]["ee_pose"], dtype=np.float64)  # (N, 6)
-        N = ee_pose.shape[0]
-        if N < 1:
-            raise ValueError(f"{demo_name} has no samples")
+        if "ee_pos" not in g_obs or "ee_quat" not in g_obs:
+            raise KeyError(f"{demo_name}/obs must have ee_pos and ee_quat")
+
+        ee_pos  = np.asarray(g_obs["ee_pos"], dtype=np.float64)    # (N,3)
+        ee_quat = np.asarray(g_obs["ee_quat"], dtype=np.float64)   # (N,4) xyzw
+        N = ee_pos.shape[0]
+        if N < 1 or ee_quat.shape[0] != N:
+            raise ValueError(f"{demo_name} invalid sample sizes (ee_pos N={ee_pos.shape[0]}, ee_quat N={ee_quat.shape[0]})")
 
         # meta to get hz if available
         meta = {}
@@ -95,22 +97,11 @@ def load_hdf5_demo(h5_path: str, demo_name: str):
             except Exception:
                 pass
 
-    return ee_pose, hz, meta
-
-
-def ypr_to_quat_xyzw(yaw, pitch, roll):
-    """
-    Convert YPR (ZYX intrinsic) into quaternion (xyzw).
-    tf_transformations:
-      quaternion_from_euler expects angles in the order that matches 'axes'.
-      For R = Rz(yaw) * Ry(pitch) * Rx(roll), use axes='rzyx' and pass (yaw, pitch, roll).
-    """
-    qx, qy, qz, qw = quaternion_from_euler(yaw, pitch, roll, axes='rzyx')
-    return np.array([qx, qy, qz, qw], dtype=float)
+    return ee_pos, ee_quat, hz, meta
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RB10 Demo Playback from robomimic HDF5")
+    parser = argparse.ArgumentParser(description="RB10 Demo Playback from robomimic HDF5 (ee_pos + ee_quat)")
     parser.add_argument("--h5", type=str, required=True, help="Path to robomimic HDF5 file")
     parser.add_argument("--demo", type=str, required=True, help="Demo id: e.g., '3' or 'demo_3'")
     parser.add_argument("--execute", action="store_true", help="Send joint commands to robot")
@@ -122,10 +113,9 @@ def main():
     args = parser.parse_args()
 
     demo_name = parse_demo_name(args.demo)
-    ee_pose, base_hz, meta = load_hdf5_demo(args.h5, demo_name)
+    ee_pos, ee_quat, base_hz, meta = load_hdf5_demo(args.h5, demo_name)
 
-    # ee_pose: [x,y,z, yaw, pitch, roll]  (YPR = ZYX intrinsic)
-    N = ee_pose.shape[0]
+    N = ee_pos.shape[0]
     i0 = max(0, int(args.start))
     i1 = min(N, int(args.end)) if args.end is not None else N
     if i0 >= i1:
@@ -145,10 +135,9 @@ def main():
 
     # Move to initial pose if executing
     start_k = i0
-    p0 = ee_pose[i0, :3].astype(float)
-    y0, pch0, r0 = ee_pose[i0, 3:].astype(float)
-    q0_xyzw = ypr_to_quat_xyzw(y0, pch0, r0)
-    q0_rad = ctrl.compute_target_qpos_from_pose(p0, q0_xyzw, enforce_guard=False)
+    p0 = ee_pos[i0].astype(float)         # (3,)
+    q0 = ee_quat[i0].astype(float)        # (4,) xyzw
+    q0_rad = ctrl.compute_target_qpos_from_pose(p0, q0, enforce_guard=False)
 
     if q0_rad is None:
         print("[ERROR] Initial IK failed; aborting playback.")
@@ -161,8 +150,7 @@ def main():
 
     if args.execute:
         try:
-            secs = float(args.initial_move_seconds)
-            secs = max(0.1, secs)
+            secs = max(0.1, float(args.initial_move_seconds))
             print(f"[INFO] Moving to initial pose ({secs:.1f}s)...")
             ctrl.publish_qpos(np.asarray(q0_rad, dtype=float).tolist(), duration=secs)
         except Exception as e:
@@ -176,19 +164,16 @@ def main():
         # Allow controller callbacks to run
         executor.spin_once(timeout_sec=0.0)
 
-        # Extract pose at step k
-        p = ee_pose[k, :3].astype(float)            # meters
-        yaw, pitch, roll = ee_pose[k, 3:].astype(float)  # radians (YPR = ZYX)
-        q_xyzw = ypr_to_quat_xyzw(yaw, pitch, roll)
+        p = ee_pos[k].astype(float)       # (3,)
+        q = ee_quat[k].astype(float)      # (4,) xyzw
 
         # IK
-        q_rad = ctrl.compute_target_qpos_from_pose(p, q_xyzw, enforce_guard=True)
+        q_rad = ctrl.compute_target_qpos_from_pose(p, q, enforce_guard=True)
         if q_rad is None:
             print(f"[WARN] k={k}: IK failed; skipping")
         else:
             if args.execute:
                 try:
-                    # You can set a shorter smoothing duration if needed
                     ctrl.publish_qpos(np.asarray(q_rad, dtype=float).tolist(), duration=max(0.05, 2.0 / hz))
                 except Exception as e:
                     print(f"[WARN] publish_qpos failed at k={k}: {e}")

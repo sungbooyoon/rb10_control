@@ -11,8 +11,9 @@ Requirements:
 
 Conventions:
 - (Optional) keep only segments where /rb/freedrive == True if --freedrive-only.
-- ACTIONS = EE delta [dx, dy, dz, dYaw, dPitch, dRoll] (YPR, intrinsic ZYX).
-- ee_pose = [pos(3), ypr(3)] with ypr = (yaw, pitch, roll) in radians.
+- ACTIONS = EE delta [dx, dy, dz, dRx, dRy, dRz] where dR is a rotation vector
+  from the relative quaternion log-map (xyzw convention).
+- OBS = separate ee_pos (m) and ee_quat (xyzw).
 - Per-demo action normalization to [-1, 1] via 99th percentile or user-provided scales.
 
 Author: ChatGPT (Sungboo’s assistant)
@@ -33,7 +34,6 @@ import cv2
 import rosbag2_py
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
-from tf_transformations import euler_from_quaternion  # for quat -> YPR (ZYX)
 
 
 # ---------------- Topics ----------------
@@ -70,6 +70,9 @@ def quat_conjugate_xyzw(q):
     return np.array([-x, -y, -z, w], dtype=np.float64)
 
 def quat_rel_rotvec(q_next_xyzw: np.ndarray, q_xyzw: np.ndarray) -> np.ndarray:
+    """
+    Rotation vector for the relative rotation q_rel = q_next * conj(q_curr).
+    """
     q_next = quat_normalize_xyzw(q_next_xyzw)
     q_curr = quat_normalize_xyzw(q_xyzw)
     q_rel = quat_multiply_xyzw(q_next, quat_conjugate_xyzw(q_curr))
@@ -135,34 +138,6 @@ def filter_pairs_by_tol(ref_ts: np.ndarray, other_ts: np.ndarray, tol: float) ->
     j = nearest_indices(ref_ts, other_ts)
     mask = np.abs(other_ts[j] - ref_ts) <= tol
     return mask, j
-
-def quat_to_ypr_zyx(q_xyzw: np.ndarray) -> np.ndarray:
-    """
-    Quaternion (xyzw) -> [yaw, pitch, roll] in radians, intrinsic ZYX.
-    Supports (4,) or (N,4).
-    """
-    q = quat_normalize_xyzw(q_xyzw)
-    if q.ndim == 1:
-        y, p, r = euler_from_quaternion([q[0], q[1], q[2], q[3]], axes='rzyx')
-        return np.array([y, p, r], dtype=np.float64)
-    out = np.zeros((q.shape[0], 3), dtype=np.float64)
-    for i in range(q.shape[0]):
-        y, p, r = euler_from_quaternion([q[i,0], q[i,1], q[i,2], q[i,3]], axes='rzyx')
-        out[i] = [y, p, r]
-    return out
-
-def unwrap_deltas(angles: np.ndarray) -> np.ndarray:
-    """
-    Row-wise unwrap over time (axis=0), then finite difference with last-step copy.
-    angles: (N,3)
-    """
-    if len(angles) <= 1:
-        return np.zeros_like(angles)
-    a = np.unwrap(angles, axis=0)
-    da = np.zeros_like(a)
-    da[:-1] = a[1:] - a[:-1]
-    da[-1] = da[-2]
-    return da
 
 
 # ---------------- Rosbag Reader ----------------
@@ -290,7 +265,7 @@ def process_single_bag(
             print(f"[WARN] freedrive_only=True but topic missing in {bag_uri} -> SKIP", file=sys.stderr)
             return None
 
-    # tcp pose -> pos + quat -> ypr
+    # tcp pose -> pos + quat(xyzw)
     tp_times = np.array([t for (t, _) in data[topics["tcp_pose"]]], dtype=np.float64)
     tp_msgs = [m for (_, m) in data[topics["tcp_pose"]]]
     tp_mask, tp_idx = filter_pairs_by_tol(ref_ts, tp_times, tol=sync_tol)
@@ -304,7 +279,7 @@ def process_single_bag(
             p = m.pose.position
             q_wxyz = (m.pose.orientation.w, m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z)
             pos[i] = [p.x, p.y, p.z]
-            quat_xyzw[i] = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]], dtype=np.float64)
+            quat_xyzw[i] = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]], dtype=np.float64)  # xyzw
             last_p, last_q = pos[i], quat_xyzw[i]
         else:
             if last_p is not None:
@@ -371,16 +346,18 @@ def process_single_bag(
     if rgb is not None:
         rgb = rgb[keep]
 
-    # ----- actions = [dx,dy,dz, dYaw,dPitch,dRoll] -----
-    def compute_action_ee_delta_ypr(pos, quat_xyzw, normalize, given_scale):
+    # ----- actions = [dx,dy,dz, rotvec(3)] -----
+    def compute_action_ee_delta(pos, quat_xyzw, normalize, given_scale):
         N = pos.shape[0]
         dpos = np.zeros((N, 3), dtype=np.float64)
+        drot = np.zeros((N, 3), dtype=np.float64)
         if N >= 2:
             dpos[:-1] = pos[1:] - pos[:-1]
-            dpos[-1]  = dpos[-2]
-        ypr = quat_to_ypr_zyx(quat_xyzw)  # (N,3)
-        dypr = unwrap_deltas(ypr)         # (N,3)
-        actions = np.concatenate([dpos, dypr], axis=1)  # (N,6)
+            for i in range(N - 1):
+                drot[i] = quat_rel_rotvec(quat_xyzw[i + 1], quat_xyzw[i])
+            dpos[-1] = dpos[-2]
+            drot[-1] = drot[-2]
+        actions = np.concatenate([dpos, drot], axis=1)  # (N,6)
         if not normalize:
             return actions.astype(np.float32), np.ones(6, dtype=np.float32)
         if given_scale is not None:
@@ -397,19 +374,19 @@ def process_single_bag(
     if action_scale_json:
         given_scale = np.array(json.loads(action_scale_json), dtype=np.float32)
 
-    actions, action_scale = compute_action_ee_delta_ypr(
+    actions, action_scale = compute_action_ee_delta(
         pos=pos, quat_xyzw=quat_xyzw,
         normalize=normalize_actions, given_scale=given_scale
     )
 
-    # ----- obs / next_obs: ee_pose = [pos, ypr] -----
+    # ----- obs / next_obs: ee_pos (3) + ee_quat (4, xyzw) -----
     def shift_next(x: Optional[np.ndarray]) -> Optional[np.ndarray]:
         if x is None or len(x) <= 1:
             return x
         return np.concatenate([x[1:], x[-1:]], axis=0)
 
-    ypr = quat_to_ypr_zyx(quat_xyzw).astype(np.float32)     # (N,3)
-    ee_pose = np.concatenate([pos.astype(np.float32), ypr], axis=1)  # (N,6) = pos(3)+ypr(3)
+    ee_pos  = pos.astype(np.float32)          # (N,3)
+    ee_quat = quat_xyzw.astype(np.float32)    # (N,4) xyzw
 
     demo = {
         "N": len(ref_ts),
@@ -419,14 +396,16 @@ def process_single_bag(
         "obs": {
             "joint_pos": q.astype(np.float32),
             "joint_vel": finite_diff(q, np.diff(ref_ts)).astype(np.float32),
-            "ee_pose": ee_pose,          # pos(3) + ypr(3)
+            "ee_pos": ee_pos,               # (N,3)
+            "ee_quat": ee_quat,             # (N,4) xyzw
             "ee_wrench": ee_wrench.astype(np.float32) if ee_wrench is not None else None,
             "rgb": rgb.astype(np.uint8) if rgb is not None else None,
         },
         "next_obs": {
             "joint_pos": shift_next(q).astype(np.float32),
             "joint_vel": shift_next(finite_diff(q, np.diff(ref_ts))).astype(np.float32),
-            "ee_pose": shift_next(ee_pose).astype(np.float32),
+            "ee_pos": shift_next(ee_pos).astype(np.float32),
+            "ee_quat": shift_next(ee_quat).astype(np.float32),
             "ee_wrench": shift_next(ee_wrench).astype(np.float32) if ee_wrench is not None else None,
             "rgb": shift_next(rgb).astype(np.uint8) if rgb is not None else None,
         },
@@ -435,9 +414,9 @@ def process_single_bag(
             "joint_names": name_order,
             "timeline_hz": target_hz,
             "sync_tol": sync_tol,
-            "action_type": "ee_delta_xyz_dypr_zyx",
-            "observation_convention": "ee_pose=[pos(3), ypr_zyx(3)]",
-            "action_format": "Δ[x,y,z,yaw,pitch,roll]",
+            "action_type": "ee_delta_xyz_rotvec",
+            "observation_convention": "ee_pos(m), ee_quat(xyzw)",
+            "action_format": "Δ[x,y,z,rotvec_x,rotvec_y,rotvec_z]",
             "action_scale": action_scale.tolist() if action_scale is not None else None,
             "bag_uri": bag_uri,
             "freedrive_only": bool(freedrive_only),
@@ -459,6 +438,7 @@ def write_many_demos(out_path: str, demos: List[Dict], env_name: str, env_type: 
     with h5py.File(out_path, "w") as f:
         g_data = f.create_group("data")
         g_data.attrs["env_args"] = json.dumps({
+            # both styles to satisfy all call-sites
             "env_name": env_name,
             "env_type": env_type,
             "env_kwargs": env_kwargs or {},
@@ -485,7 +465,8 @@ def write_many_demos(out_path: str, demos: List[Dict], env_name: str, env_type: 
             go = g.create_group("obs")
             go.create_dataset("joint_pos", data=demo["obs"]["joint_pos"])
             go.create_dataset("joint_vel", data=demo["obs"]["joint_vel"])
-            go.create_dataset("ee_pose",  data=demo["obs"]["ee_pose"])  # ONLY ee_pose (pos+ypr)
+            go.create_dataset("ee_pos",  data=demo["obs"]["ee_pos"])     # (N,3)
+            go.create_dataset("ee_quat", data=demo["obs"]["ee_quat"])    # (N,4) xyzw
             if demo["obs"]["ee_wrench"] is not None:
                 go.create_dataset("ee_wrench", data=demo["obs"]["ee_wrench"])
             if demo["obs"]["rgb"] is not None:
@@ -495,7 +476,8 @@ def write_many_demos(out_path: str, demos: List[Dict], env_name: str, env_type: 
             gn = g.create_group("next_obs")
             gn.create_dataset("joint_pos", data=demo["next_obs"]["joint_pos"])
             gn.create_dataset("joint_vel", data=demo["next_obs"]["joint_vel"])
-            gn.create_dataset("ee_pose",  data=demo["next_obs"]["ee_pose"])  # ONLY ee_pose (pos+ypr)
+            gn.create_dataset("ee_pos",  data=demo["next_obs"]["ee_pos"])
+            gn.create_dataset("ee_quat", data=demo["next_obs"]["ee_quat"])
             if demo["next_obs"]["ee_wrench"] is not None:
                 gn.create_dataset("ee_wrench", data=demo["next_obs"]["ee_wrench"])
             if demo["next_obs"]["rgb"] is not None:
@@ -537,7 +519,7 @@ def parse_args():
     p.add_argument("--normalize-actions", action="store_true", default=True)
     p.add_argument("--no-normalize-actions", action="store_false", dest="normalize_actions")
     p.add_argument("--action-scale-json", type=str, default=None,
-                   help='JSON list of 6 scales for [dx,dy,dz,dYaw,dPitch,dRoll], e.g. "[0.02,0.02,0.02,0.2,0.2,0.2]"')
+                   help='JSON list of 6 scales for [dx,dy,dz,dRx,dRy,dRz], e.g. "[0.02,0.02,0.02,0.2,0.2,0.2]"')
     p.add_argument("--topic-joint-states", type=str, default=DEFAULT_TOPICS["joint_states"])
     p.add_argument("--topic-tcp-pose", type=str, default=DEFAULT_TOPICS["tcp_pose"])
     p.add_argument("--topic-freedrive", type=str, default=DEFAULT_TOPICS["freedrive"])

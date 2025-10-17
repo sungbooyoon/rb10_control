@@ -45,6 +45,9 @@ python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_demo_playback.py \
   --h5 /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5 --demo demo_0 --execute
 
 
+#2.4 Train with robomimic
+cd ~/robomimic/robomimic/scripts
+python3 train.py --config ../exps/test/bc-rnn.json --dataset /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5
 
 
 # Others
