@@ -5,16 +5,19 @@
 Aggregate multiple ROS2 bags (MCAP files or bag directories) into a single
 robomimic-compatible HDF5 with demo_0, demo_1, ...
 
+Changes vs. previous version:
+- ACTION = Δee_pos (3) + 6D relative rotation (first two columns of R_rel)
+- Saved as HDF5 dataset: actions (N,9)  [Δx,Δy,Δz, r11,r21,r31, r12,r22,r32]
+- Optional per-demo normalization to [-1, 1]; scale is length 9
+
 Requirements:
 - rosbag2_py, rosidl_runtime_py
 - numpy, h5py, opencv-python
 
 Conventions:
 - (Optional) keep only segments where /rb/freedrive == True if --freedrive-only.
-- ACTIONS = EE delta [dx, dy, dz, dRx, dRy, dRz] where dR is a rotation vector
-  from the relative quaternion log-map (xyzw convention).
 - OBS = separate ee_pos (m) and ee_quat (xyzw).
-- Per-demo action normalization to [-1, 1] via 99th percentile or user-provided scales.
+- Per-demo action normalization via 99th percentile or user-provided scales.
 
 Author: ChatGPT (Sungboo’s assistant)
 """
@@ -69,24 +72,37 @@ def quat_conjugate_xyzw(q):
     x, y, z, w = q
     return np.array([-x, -y, -z, w], dtype=np.float64)
 
-def quat_rel_rotvec(q_next_xyzw: np.ndarray, q_xyzw: np.ndarray) -> np.ndarray:
+def quat_relative_xyzw(q_next_xyzw: np.ndarray, q_xyzw: np.ndarray) -> np.ndarray:
     """
-    Rotation vector for the relative rotation q_rel = q_next * conj(q_curr).
+    q_rel = q_next * conj(q_curr) in xyzw.
     """
     q_next = quat_normalize_xyzw(q_next_xyzw)
     q_curr = quat_normalize_xyzw(q_xyzw)
-    q_rel = quat_multiply_xyzw(q_next, quat_conjugate_xyzw(q_curr))
-    x, y, z, w = q_rel
-    w = np.clip(w, -1.0, 1.0)
-    v = np.array([x, y, z], dtype=np.float64)
-    s = np.linalg.norm(v)
-    if s < 1e-12:
-        return np.zeros(3, dtype=np.float64)
-    angle = 2.0 * np.arctan2(s, w)
-    if angle > np.pi:
-        angle -= 2.0 * np.pi
-    axis = v / s
-    return axis * angle
+    return quat_multiply_xyzw(q_next, quat_conjugate_xyzw(q_curr))
+
+def quat_to_rotmat_xyzw(q: np.ndarray) -> np.ndarray:
+    """
+    q: (4,) in xyzw. returns 3x3 rotation matrix.
+    """
+    x, y, z, w = quat_normalize_xyzw(q)
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
+    wx, wy, wz = w*x, w*y, w*z
+    R = np.array([
+        [1 - 2*(yy + zz),     2*(xy - wz),       2*(xz + wy)],
+        [    2*(xy + wz),  1 - 2*(xx + zz),      2*(yz - wx)],
+        [    2*(xz - wy),     2*(yz + wx),    1 - 2*(xx + yy)]
+    ], dtype=np.float64)
+    return R
+
+def rotmat_to_6d(R: np.ndarray) -> np.ndarray:
+    """
+    Zhou et al. CVPR'19 6D rep = first two columns of R (flattened col-wise):
+    [r11,r21,r31, r12,r22,r32]
+    """
+    c1 = R[:, 0]
+    c2 = R[:, 1]
+    return np.concatenate([c1, c2], axis=0).astype(np.float64)
 
 def rosimg_to_rgb_numpy(msg) -> np.ndarray:
     h, w = msg.height, msg.width
@@ -346,40 +362,55 @@ def process_single_bag(
     if rgb is not None:
         rgb = rgb[keep]
 
-    # ----- actions = [dx,dy,dz, rotvec(3)] -----
-    def compute_action_ee_delta(pos, quat_xyzw, normalize, given_scale):
+    # ----- actions = Δpos(3) + 6D rot (relative) -> flat 9D -----
+    def compute_action_ee_delta_6d(pos: np.ndarray,
+                                   quat_xyzw: np.ndarray,
+                                   normalize: bool,
+                                   given_scale9: Optional[np.ndarray]
+                                   ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """
+        Returns:
+          actions9: (N,9) [Δx,Δy,Δz, r11,r21,r31, r12,r22,r32]
+          scale: (9,) if normalize else None
+        """
         N = pos.shape[0]
-        dpos = np.zeros((N, 3), dtype=np.float64)
-        drot = np.zeros((N, 3), dtype=np.float64)
+        dpos  = np.zeros((N, 3), dtype=np.float64)
+        r6d   = np.zeros((N, 6), dtype=np.float64)
+
         if N >= 2:
             dpos[:-1] = pos[1:] - pos[:-1]
             for i in range(N - 1):
-                drot[i] = quat_rel_rotvec(quat_xyzw[i + 1], quat_xyzw[i])
+                q_rel = quat_relative_xyzw(quat_xyzw[i + 1], quat_xyzw[i])
+                R_rel = quat_to_rotmat_xyzw(q_rel)
+                r6d[i] = rotmat_to_6d(R_rel)
             dpos[-1] = dpos[-2]
-            drot[-1] = drot[-2]
-        actions = np.concatenate([dpos, drot], axis=1)  # (N,6)
+            r6d[-1]  = r6d[-2]
+
+        actions = np.concatenate([dpos, r6d], axis=1)  # (N,9)
+
         if not normalize:
-            return actions.astype(np.float32), np.ones(6, dtype=np.float32)
-        if given_scale is not None:
-            scale = np.asarray(given_scale, dtype=np.float32)
-            assert scale.shape == (6,), "action-scale must be length 6"
-            scale = np.clip(np.abs(scale), 1e-9, None)
+            return actions.astype(np.float32), None
+
+        if given_scale9 is not None:
+            s = np.clip(np.abs(given_scale9.astype(np.float32)), 1e-9, None)
+            assert s.shape == (9,), "action-scale must be length 9"
         else:
-            scale = np.percentile(np.abs(actions), 99, axis=0).astype(np.float32)
-            scale = np.clip(scale, 1e-9, None)
-        actions_n = np.clip(actions / scale[None, :], -1.0, 1.0).astype(np.float32)
-        return actions_n, scale
+            s = np.percentile(np.abs(actions), 99, axis=0).astype(np.float32)
+            s = np.clip(s, 1e-9, None)
+
+        actions_n = np.clip(actions / s[None, :], -1.0, 1.0).astype(np.float32)
+        return actions_n, s
 
     given_scale = None
     if action_scale_json:
         given_scale = np.array(json.loads(action_scale_json), dtype=np.float32)
 
-    actions, action_scale = compute_action_ee_delta(
+    actions9, action_scale = compute_action_ee_delta_6d(
         pos=pos, quat_xyzw=quat_xyzw,
-        normalize=normalize_actions, given_scale=given_scale
+        normalize=normalize_actions, given_scale9=given_scale
     )
 
-    # ----- obs / next_obs: ee_pos (3) + ee_quat (4, xyzw) -----
+    # ----- obs / next_obs -----
     def shift_next(x: Optional[np.ndarray]) -> Optional[np.ndarray]:
         if x is None or len(x) <= 1:
             return x
@@ -390,20 +421,20 @@ def process_single_bag(
 
     demo = {
         "N": len(ref_ts),
-        "actions": actions.astype(np.float32),
+        "actions": actions9.astype(np.float32),      # (N,9)
         "rewards": np.zeros((len(ref_ts),), dtype=np.float32),
         "dones": np.concatenate([np.zeros((len(ref_ts)-1,), dtype=np.uint8), np.array([1], dtype=np.uint8)], axis=0),
         "obs": {
             "joint_pos": q.astype(np.float32),
-            "joint_vel": finite_diff(q, np.diff(ref_ts)).astype(np.float32),
-            "ee_pos": ee_pos,               # (N,3)
-            "ee_quat": ee_quat,             # (N,4) xyzw
+            "joint_vel": qd.astype(np.float32),
+            "ee_pos": ee_pos,
+            "ee_quat": ee_quat,
             "ee_wrench": ee_wrench.astype(np.float32) if ee_wrench is not None else None,
             "rgb": rgb.astype(np.uint8) if rgb is not None else None,
         },
         "next_obs": {
             "joint_pos": shift_next(q).astype(np.float32),
-            "joint_vel": shift_next(finite_diff(q, np.diff(ref_ts))).astype(np.float32),
+            "joint_vel": shift_next(qd).astype(np.float32),
             "ee_pos": shift_next(ee_pos).astype(np.float32),
             "ee_quat": shift_next(ee_quat).astype(np.float32),
             "ee_wrench": shift_next(ee_wrench).astype(np.float32) if ee_wrench is not None else None,
@@ -414,10 +445,10 @@ def process_single_bag(
             "joint_names": name_order,
             "timeline_hz": target_hz,
             "sync_tol": sync_tol,
-            "action_type": "ee_delta_xyz_rotvec",
-            "observation_convention": "ee_pos(m), ee_quat(xyzw)",
-            "action_format": "Δ[x,y,z,rotvec_x,rotvec_y,rotvec_z]",
-            "action_scale": action_scale.tolist() if action_scale is not None else None,
+            "action_type": "ee_delta_xyz + rot6d_rel",
+            "action_format": "actions = [Δx,Δy,Δz, r11,r21,r31, r12,r22,r32]",
+            "action_dim": 9,
+            "action_scale": action_scale.tolist() if action_scale is not None else None,  # len 9 or None
             "bag_uri": bag_uri,
             "freedrive_only": bool(freedrive_only),
         }
@@ -438,7 +469,8 @@ def write_many_demos(out_path: str, demos: List[Dict], env_name: str, env_type: 
     with h5py.File(out_path, "w") as f:
         g_data = f.create_group("data")
         g_data.attrs["env_args"] = json.dumps({
-            # both styles to satisfy all call-sites
+            "name": env_name,
+            "type": env_type,
             "env_name": env_name,
             "env_type": env_type,
             "env_kwargs": env_kwargs or {},
@@ -457,7 +489,7 @@ def write_many_demos(out_path: str, demos: List[Dict], env_name: str, env_type: 
             # core datasets
             g.attrs["num_samples"] = N
             g.create_dataset("states", data=np.zeros((N, 0), dtype=np.float32))
-            g.create_dataset("actions", data=demo["actions"])
+            g.create_dataset("actions", data=demo["actions"])  # (N,9)
             g.create_dataset("rewards", data=demo["rewards"])
             g.create_dataset("dones", data=demo["dones"])
 
@@ -519,7 +551,7 @@ def parse_args():
     p.add_argument("--normalize-actions", action="store_true", default=True)
     p.add_argument("--no-normalize-actions", action="store_false", dest="normalize_actions")
     p.add_argument("--action-scale-json", type=str, default=None,
-                   help='JSON list of 6 scales for [dx,dy,dz,dRx,dRy,dRz], e.g. "[0.02,0.02,0.02,0.2,0.2,0.2]"')
+                   help='JSON list of 9 scales for [dX,dY,dZ, rot6d(6)], e.g. "[0.02,0.02,0.02, 0.5,0.5,0.5, 0.5,0.5,0.5]"')
     p.add_argument("--topic-joint-states", type=str, default=DEFAULT_TOPICS["joint_states"])
     p.add_argument("--topic-tcp-pose", type=str, default=DEFAULT_TOPICS["tcp_pose"])
     p.add_argument("--topic-freedrive", type=str, default=DEFAULT_TOPICS["freedrive"])
