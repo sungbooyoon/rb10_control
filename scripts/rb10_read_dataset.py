@@ -217,7 +217,7 @@ def main():
             demo_i = data[demo_key]
             if "obs" not in demo_i:
                 continue
-            obs_i = demo_i["obs"]
+            obs_i = dem o_i["obs"]
             if "ee_pos" not in obs_i:
                 print(f"[skip] {demo_key}: obs/ee_pos 없음")
                 continue
