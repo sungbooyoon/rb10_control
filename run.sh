@@ -4,7 +4,7 @@ ros2 launch rbpodo_moveit_config moveit.launch.py use_fake_hardware:=false
 ros2 launch realsense2_camera rs_launch.py 
 
 # 1.2 teleoperation
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_teleop.py
+python3 /home/sungboo/rb10_control/scripts/rb10_teleop.py
 
 
 
@@ -16,38 +16,38 @@ ros2 run tf2_ros static_transform_publisher \
 
 # 2.2 collect dataset
 # 2.2.1 kinesthetic teaching mode
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_controller.py
+python3 /home/sungboo/rb10_control/scripts/rb10_controller.py
 
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_demo_recorder_bridge.py
+python3 /home/sungboo/rb10_control/scripts/rb10_demo_recorder_bridge.py
 
-cd /home/sungboo/ros2_ws/src/rb10_control/dataset
+cd /home/sungboo/rb10_control/dataset
 ros2 bag record /tf /rb/joint_states /rb/tcp_pose /rb/freedrive /rb/ee_wrench /camera/camera/color/image_raw
 
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
-  --folder /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3 \
-  --out /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5 \
+python3 /home/sungboo/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
+  --folder /home/sungboo/rb10_control/dataset/251017_kin_3 \
+  --out /home/sungboo/rb10_control/dataset/251017_kin_3.hdf5 \
   --no-normalize-actions --freedrive-only
 
 # 2.2.2 teleoperation mode
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_controller.py
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_teleop.py
+python3 /home/sungboo/rb10_control/scripts/rb10_controller.py
+python3 /home/sungboo/rb10_control/scripts/rb10_teleop.py
 
 ros2 bag record /tf /rb/joint_states /rb/tcp_pose /rb/freedrive /rb/ee_wrench /rb/teleop_delta /camera/camera/color/image_raw 
 
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
-  --folder /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_tel_1 \
-  --out /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_tel_1.hdf5 \
+python3 /home/sungboo/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
+  --folder /home/sungboo/rb10_control/dataset/251017_tel_1 \
+  --out /home/sungboo/rb10_control/dataset/251017_tel_1.hdf5 \
   --no-normalize-actions --no-freedrive-only
 
 # 2.3 playback one demo
 ros2 launch rbpodo_moveit_config moveit.launch.py use_fake_hardware:=false
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_demo_playback.py \
-  --h5 /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5 --demo demo_0 --execute
+python3 /home/sungboo/rb10_control/scripts/rb10_demo_playback.py \
+  --h5 /home/sungboo/rb10_control/dataset/251017_kin_3.hdf5 --demo demo_0 --execute
 
 
 #2.4 Train with robomimic
 cd ~/robomimic/robomimic/scripts
-python3 train.py --config ../exps/test/bc-rnn.json --dataset /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5
+python3 train.py --config ../exps/test/bc-rnn.json --dataset /home/sungboo/rb10_control/dataset/251017_kin_3.hdf5
 
 
 # Others
@@ -71,7 +71,7 @@ ros2 run tf2_ros static_transform_publisher \
 
 
 
-python3 /home/sungboo/ros2_ws/src/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
-  --folder /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3 \
-  --out /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5 \
+python3 /home/sungboo/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
+  --folder /home/sungboo/rb10_control/dataset/251017_kin_3 \
+  --out /home/sungboo/rb10_control/dataset/251017_kin_3.hdf5 \
   --no-normalize-actions --freedrive-only
