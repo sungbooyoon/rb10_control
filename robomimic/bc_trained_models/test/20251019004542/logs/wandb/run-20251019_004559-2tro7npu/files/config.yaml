@@ -1,0 +1,70 @@
+_wandb:
+    value:
+        cli_version: 0.22.2
+        code_path: code/robomimic/scripts/train.py
+        e:
+            9phghw891cmyizc4yfnf4ytzwrzol0r6:
+                args:
+                    - --config
+                    - ../exps/test/bc-rnn.json
+                    - --dataset
+                    - /home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5
+                codePath: robomimic/scripts/train.py
+                codePathLocal: train.py
+                cpu_count: 14
+                cpu_count_logical: 20
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "97418416128"
+                        used: "65955946496"
+                email: yoonsb24@snu.ac.kr
+                executable: /home/sungboo/venvs/ros-jazzy/bin/python3
+                git:
+                    commit: 0ca7ce74cf8f20be32029657ef9320db033d93e9
+                    remote: https://github.com/ARISE-Initiative/robomimic.git
+                gpu: NVIDIA GeForce RTX 4050 Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 2560
+                      memoryTotal: "6439305216"
+                      name: NVIDIA GeForce RTX 4050 Laptop GPU
+                      uuid: GPU-63fce92e-098d-4c44-7cc1-b3fa159f50f3
+                host: sungboo-Vivobook-ASUSLaptop-K6602VU-K6602VU
+                memory:
+                    total: "16367165440"
+                os: Linux-6.8.0-85-generic-x86_64-with-glibc2.39
+                program: /home/sungboo/robomimic/robomimic/scripts/train.py
+                python: CPython 3.12.3
+                root: /home/sungboo/robomimic/robomimic/../bc_trained_models/test/20251019004542/logs
+                startedAt: "2025-10-18T15:45:59.058218Z"
+                writerId: 9phghw891cmyizc4yfnf4ytzwrzol0r6
+        m: []
+        python_version: 3.12.3
+        t:
+            "1":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 83
+            "2":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 50
+                - 83
+            "3":
+                - 13
+                - 61
+            "4": 3.12.3
+            "5": 0.22.2
+            "6": 4.41.2
+            "12": 0.22.2
+            "13": linux-x86_64
+algo:
+    value: bc
+hp_base_config_file:
+    value: null

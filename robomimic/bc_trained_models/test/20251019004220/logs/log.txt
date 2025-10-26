@@ -1,0 +1,200 @@
+
+============= Initialized Observation Utils with Obs Spec =============
+
+using obs modality: low_dim with keys: ['ee_pos', 'ee_quat']
+using obs modality: rgb with keys: ['rgb']
+using obs modality: depth with keys: []
+using obs modality: scan with keys: []
+
+============= Loaded Environment Metadata =============
+obs key ee_pos with shape (3,)
+obs key ee_quat with shape (4,)
+obs key rgb with shape (480, 640, 3)
+
+SequenceDataset: loading dataset into memory...
+  0%|          | 0/3 [00:00<?, ?it/s] 33%|###3      | 1/3 [00:03<00:06,  3.07s/it] 67%|######6   | 2/3 [00:07<00:04,  4.04s/it]100%|##########| 3/3 [00:12<00:00,  4.39s/it]100%|##########| 3/3 [00:12<00:00,  4.20s/it]
+SequenceDataset: caching get_item calls...
+  0%|          | 0/1098 [00:00<?, ?it/s]SequenceDataset: computing action statistics...
+
+  0%|          | 0/2 [00:00<?, ?it/s][A100%|##########| 2/2 [00:00<00:00, 1759.36it/s]
+ 14%|#4        | 159/1098 [00:00<00:00, 1589.57it/s] 31%|###       | 337/1098 [00:00<00:00, 1700.83it/s] 46%|####6     | 508/1098 [00:00<00:00, 1702.69it/s] 62%|######2   | 685/1098 [00:00<00:00, 1728.11it/s] 78%|#######8  | 860/1098 [00:00<00:00, 1734.76it/s] 94%|#########4| 1034/1098 [00:00<00:00, 1724.56it/s]100%|##########| 1098/1098 [00:00<00:00, 1705.06it/s]
+
+============= Training Dataset =============
+SequenceDataset (
+	path=/home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5
+	obs_keys=('ee_pos', 'ee_quat', 'rgb')
+	seq_length=1
+	filter_key=none
+	frame_stack=1
+	pad_seq_length=True
+	pad_frame_stack=True
+	goal_mode=none
+	cache_mode=all
+	num_demos=3
+	num_sequences=1098
+)
+
+/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+wandb: Currently logged in as: sungbooyoon to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+ROBOMIMIC WARNING(
+    wandb initialization error (attempt #1): 'PrintLogger' object has no attribute 'isatty'
+)
+Traceback (most recent call last):
+  File "/home/sungboo/robomimic/robomimic/utils/log_utils.py", line 77, in __init__
+    self._wandb_logger.init(
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/wandb_init.py", line 1601, in init
+    wandb._sentry.reraise(e)
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/analytics/sentry.py", line 162, in reraise
+    raise exc.with_traceback(sys.exc_info()[2])
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/wandb_init.py", line 1582, in init
+    run = wi.init(run_settings, run_config, run_printer)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/wandb_init.py", line 1004, in init
+    result = wait_with_progress(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 23, in wait_with_progress
+    return wait_all_with_progress(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 77, in wait_all_with_progress
+    return asyncer.run(progress_loop_with_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_manager.py", line 136, in run
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_manager.py", line 219, in _wrap
+    return await fn()
+           ^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 65, in progress_loop_with_timeout
+    async with asyncio_compat.cancel_on_exit(display_progress()):
+  File "/usr/lib/python3.12/contextlib.py", line 217, in __aexit__
+    await anext(self.gen)
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_compat.py", line 257, in cancel_on_exit
+    async with open_task_group(race=True) as group:
+  File "/usr/lib/python3.12/contextlib.py", line 217, in __aexit__
+    await anext(self.gen)
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_compat.py", line 240, in open_task_group
+    await task_group._wait_all(race=race, timeout=exit_timeout)
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_compat.py", line 180, in _wait_all
+    raise exc
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/wandb_init.py", line 994, in display_init_message
+    with progress.progress_printer(
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/progress.py", line 76, in progress_printer
+    with printer.dynamic_text() as text_area:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/printer.py", line 297, in dynamic_text
+    with term.dynamic_text() as handle:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/errors/term.py", line 114, in dynamic_text
+    if not _sys_stderr_isatty():
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/errors/term.py", line 150, in _sys_stderr_isatty
+    return sys.stderr.isatty()
+           ^^^^^^^^^^^^^^^^^
+AttributeError: 'PrintLogger' object has no attribute 'isatty'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/sungboo/robomimic/robomimic/scripts/train.py", line 567, in <module>
+    main(args)
+  File "/home/sungboo/robomimic/robomimic/scripts/train.py", line 511, in main
+    train(config, device=device, resume=args.resume)
+  File "/home/sungboo/robomimic/robomimic/scripts/train.py", line 227, in train
+    data_logger = DataLogger(
+                  ^^^^^^^^^^^
+  File "/home/sungboo/robomimic/robomimic/utils/log_utils.py", line 97, in __init__
+    time.sleep(30)
+KeyboardInterrupt
+Traceback (most recent call last):
+  File "/home/sungboo/robomimic/robomimic/utils/log_utils.py", line 77, in __init__
+    self._wandb_logger.init(
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/wandb_init.py", line 1601, in init
+    wandb._sentry.reraise(e)
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/analytics/sentry.py", line 162, in reraise
+    raise exc.with_traceback(sys.exc_info()[2])
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/wandb_init.py", line 1582, in init
+    run = wi.init(run_settings, run_config, run_printer)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/wandb_init.py", line 1004, in init
+    result = wait_with_progress(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 23, in wait_with_progress
+    return wait_all_with_progress(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 77, in wait_all_with_progress
+    return asyncer.run(progress_loop_with_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_manager.py", line 136, in run
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_manager.py", line 219, in _wrap
+    return await fn()
+           ^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 65, in progress_loop_with_timeout
+    async with asyncio_compat.cancel_on_exit(display_progress()):
+  File "/usr/lib/python3.12/contextlib.py", line 217, in __aexit__
+    await anext(self.gen)
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_compat.py", line 257, in cancel_on_exit
+    async with open_task_group(race=True) as group:
+  File "/usr/lib/python3.12/contextlib.py", line 217, in __aexit__
+    await anext(self.gen)
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_compat.py", line 240, in open_task_group
+    await task_group._wait_all(race=race, timeout=exit_timeout)
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/asyncio_compat.py", line 180, in _wait_all
+    raise exc
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/wandb_init.py", line 994, in display_init_message
+    with progress.progress_printer(
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/progress.py", line 76, in progress_printer
+    with printer.dynamic_text() as text_area:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/sdk/lib/printer.py", line 297, in dynamic_text
+    with term.dynamic_text() as handle:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/errors/term.py", line 114, in dynamic_text
+    if not _sys_stderr_isatty():
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/sungboo/venvs/ros-jazzy/lib/python3.12/site-packages/wandb/errors/term.py", line 150, in _sys_stderr_isatty
+    return sys.stderr.isatty()
+           ^^^^^^^^^^^^^^^^^
+AttributeError: 'PrintLogger' object has no attribute 'isatty'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/sungboo/robomimic/robomimic/scripts/train.py", line 567, in <module>
+    main(args)
+  File "/home/sungboo/robomimic/robomimic/scripts/train.py", line 511, in main
+    train(config, device=device, resume=args.resume)
+  File "/home/sungboo/robomimic/robomimic/scripts/train.py", line 227, in train
+    data_logger = DataLogger(
+                  ^^^^^^^^^^^
+  File "/home/sungboo/robomimic/robomimic/utils/log_utils.py", line 97, in __init__
+    time.sleep(30)
+KeyboardInterrupt

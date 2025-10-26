@@ -1,0 +1,46 @@
+{
+  "os": "Linux-6.8.0-85-generic-x86_64-with-glibc2.39",
+  "python": "CPython 3.12.3",
+  "startedAt": "2025-10-18T15:45:59.058218Z",
+  "args": [
+    "--config",
+    "../exps/test/bc-rnn.json",
+    "--dataset",
+    "/home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5"
+  ],
+  "program": "/home/sungboo/robomimic/robomimic/scripts/train.py",
+  "codePath": "robomimic/scripts/train.py",
+  "codePathLocal": "train.py",
+  "git": {
+    "remote": "https://github.com/ARISE-Initiative/robomimic.git",
+    "commit": "0ca7ce74cf8f20be32029657ef9320db033d93e9"
+  },
+  "email": "yoonsb24@snu.ac.kr",
+  "root": "/home/sungboo/robomimic/robomimic/../bc_trained_models/test/20251019004542/logs",
+  "host": "sungboo-Vivobook-ASUSLaptop-K6602VU-K6602VU",
+  "executable": "/home/sungboo/venvs/ros-jazzy/bin/python3",
+  "cpu_count": 14,
+  "cpu_count_logical": 20,
+  "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "97418416128",
+      "used": "65955946496"
+    }
+  },
+  "memory": {
+    "total": "16367165440"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+      "memoryTotal": "6439305216",
+      "cudaCores": 2560,
+      "architecture": "Ada",
+      "uuid": "GPU-63fce92e-098d-4c44-7cc1-b3fa159f50f3"
+    }
+  ],
+  "cudaVersion": "12.8",
+  "writerId": "9phghw891cmyizc4yfnf4ytzwrzol0r6"
+}
