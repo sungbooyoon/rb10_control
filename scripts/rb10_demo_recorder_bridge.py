@@ -7,14 +7,17 @@ rbpodo -> ROS2 bridge (for rosbag)
 - Publishes:
   /rb/joint_states      sensor_msgs/JointState        (rad)
   /rb/tcp_pose          geometry_msgs/PoseStamped     (m + quaternion xyzw)
-  /rb/freedrive         std_msgs/Bool
   /rb/ee_wrench         geometry_msgs/WrenchStamped   (if available)
+  /rb/stroke_event      std_msgs/String               (annotation for strokes, freedrive can be toggled via rbpodo command (not published as a ROS topic))
 """
 
 import time
 import sys
 import math
 import argparse
+import json
+import threading
+import select
 
 import numpy as np
 import rbpodo as rb
@@ -23,7 +26,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
-from std_msgs.msg import Header, Bool
+from std_msgs.msg import Header, String
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 
@@ -68,27 +71,41 @@ def tcp_to_pose_msg(node: Node, tcp_pos_deg: list, base_frame: str, ee_frame: st
     return msg
 
 class RbBridge(Node):
-    def __init__(self, ip: str, hz: float, base_frame: str, ee_frame: str, joint_names):
+    def __init__(self, ip: str, hz: float, base_frame: str, ee_frame: str, joint_names, freedrive_on_start: bool, enable_keyboard: bool):
         super().__init__("rbpodo_bridge")
         self.ip = ip
         self.hz = float(hz)
         self.base_frame = base_frame
         self.ee_frame = ee_frame
         self.joint_names = joint_names
+        self.freedrive_on_start = freedrive_on_start
+        self.enable_keyboard = enable_keyboard
 
         # rb channel
         self.ch = rb.CobotData(self.ip)
+        # rb command channel (for freedrive mode control)
+        self.robot = rb.Cobot(self.ip)
+        self.rc = rb.ResponseCollector()
         self.first_timeout = 1.0
         self.loop_timeout = max(0.001, 1.0 / self.hz * 0.5)
 
         # pubs
         self.pub_js = self.create_publisher(JointState, "/rb/joint_states", DEFAULT_QOS)
         self.pub_pose = self.create_publisher(PoseStamped, "/rb/tcp_pose", DEFAULT_QOS)
-        self.pub_freedrive = self.create_publisher(Bool, "/rb/freedrive", DEFAULT_QOS)
         self.pub_wrench = self.create_publisher(WrenchStamped, "/rb/ee_wrench", DEFAULT_QOS)
+        self.pub_stroke_event = self.create_publisher(String, "/rb/stroke_event", DEFAULT_QOS)
 
         # timer
         self.timer = self.create_timer(1.0 / self.hz, self._on_timer)
+
+        # stroke event state
+        self._stroke_id = 0
+        self._stroke_active = False
+        self._active_skill_id = None
+
+        if self.enable_keyboard:
+            self._keyboard_thread = threading.Thread(target=self._keyboard_loop, daemon=True)
+            self._keyboard_thread.start()
 
         self.get_logger().info(f"Connecting to rbpodo at {self.ip} ...")
         # Warm-up: try one packet
@@ -107,6 +124,14 @@ class RbBridge(Node):
             self.get_logger().error("No first packet. Will continue trying in timer.")
         else:
             self.get_logger().info("First packet received.")
+
+        # Optional: set freedrive ON at start (command only; not published)
+        if self.freedrive_on_start:
+            try:
+                res = self.robot.set_freedrive_mode(self.rc, True)
+                self.get_logger().info(f"Freedrive ON requested at start (res={res})")
+            except Exception as e:
+                self.get_logger().warn(f"Failed to request freedrive ON at start: {e}")
 
     def _on_timer(self):
         # pull one packet
@@ -142,13 +167,6 @@ class RbBridge(Node):
         except Exception as e:
             self.get_logger().warn(f"TCP pose publish failed: {e}")
 
-        # --- Freedrive ---
-        try:
-            freedrive = int(getattr(s, "is_freedrive_mode", 0))
-            self.pub_freedrive.publish(Bool(data=bool(freedrive)))
-        except Exception as e:
-            self.get_logger().warn(f"Freedrive publish failed: {e}")
-
         # --- Wrench (있을 때만) ---
         try:
             # 속성이 없으면 None
@@ -172,15 +190,100 @@ class RbBridge(Node):
         except Exception as e:
             self.get_logger().warn(f"Wrench publish failed: {e}")
 
+    def _publish_stroke_event(self, event_type: str, skill_id: str, stroke_id: int):
+        msg = String()
+        t = self.get_clock().now().to_msg()
+        timestamp_ns = t.sec * 1_000_000_000 + t.nanosec
+        msg.data = json.dumps({
+            "event": event_type,
+            "skill_id": skill_id,
+            "stroke_id": stroke_id,
+            "timestamp": timestamp_ns
+        })
+        self.pub_stroke_event.publish(msg)
+        self.get_logger().info(f"Stroke event published: {msg.data}")
+
+    def _keyboard_loop(self):
+        self.get_logger().info(
+            "Keyboard input enabled. Commands:\n"
+            "  s<skill_id>  : start stroke (annotate, e.g. s1, s2, s10)\n"
+            "  e            : end stroke (annotate)\n"
+            "  on           : freedrive teach ON (rbpodo command)\n"
+            "  off          : freedrive teach OFF (rbpodo command)\n"
+            "  q            : quit"
+        )
+        while rclpy.ok():
+            try:
+                if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
+                    line = sys.stdin.readline()
+                    if not line:
+                        continue
+                    line = line.strip()
+
+                    if line == "on":
+                        try:
+                            res = self.robot.set_freedrive_mode(self.rc, True)
+                            self.get_logger().info(f"Freedrive ON requested (res={res})")
+                        except Exception as e:
+                            self.get_logger().warn(f"Freedrive ON failed: {e}")
+                        continue
+
+                    if line == "off":
+                        try:
+                            res = self.robot.set_freedrive_mode(self.rc, False)
+                            self.get_logger().info(f"Freedrive OFF requested (res={res})")
+                        except Exception as e:
+                            self.get_logger().warn(f"Freedrive OFF failed: {e}")
+                        continue
+
+                    # stroke start: ONLY support `s<skill_id>` (no space)
+                    if line.startswith("s") and len(line) > 1:
+                        skill_id = line[1:].strip()
+
+                        if not skill_id:
+                            self.get_logger().warn("Skill ID required after 's'")
+                            continue
+                        if self._stroke_active:
+                            self.get_logger().warn("Stroke already active. End current stroke before starting a new one.")
+                            continue
+
+                        # on stroke start
+                        self._stroke_id += 1
+                        self._active_skill_id = skill_id
+                        self._stroke_active = True
+                        self._publish_stroke_event("start", self._active_skill_id, self._stroke_id)
+                        continue
+
+                    if line == "e":
+                        if not self._stroke_active:
+                            self.get_logger().warn("No active stroke to end.")
+                            continue
+                        # on stroke end
+                        self._stroke_active = False
+                        self._publish_stroke_event("end", self._active_skill_id, self._stroke_id)
+                    elif line == "q":
+                        if self._stroke_active:
+                            self._stroke_active = False
+                            self._publish_stroke_event("end", self._active_skill_id, self._stroke_id)
+                        self.get_logger().info("Quitting...")
+                        rclpy.shutdown()
+                        break
+                    else:
+                        self.get_logger().warn(f"Unknown command: {line}")
+                else:
+                    time.sleep(0.1)
+            except Exception as e:
+                self.get_logger().error(f"Keyboard loop error: {e}")
+
 def main():
     parser = argparse.ArgumentParser(description="rbpodo -> ROS2 publishers (for rosbag)")
     parser.add_argument("--ip", type=str, default="10.0.2.7")
     parser.add_argument("--hz", type=float, default=30.0)
     parser.add_argument("--base-frame", type=str, default="link0")
     parser.add_argument("--ee-frame", type=str, default="tcp")
-    parser.add_argument("--joint-names", type=str,
-                        default="base,shoulder,elbow,wrist1,wrist2,wrist3",
-                        help="comma-separated 6 names")
+    parser.add_argument("--joint-names", type=str, default="base,shoulder,elbow,wrist1,wrist2,wrist3", help="comma-separated 6 names")
+    parser.add_argument("--freedrive-on-start", action="store_true", default=False)
+    parser.add_argument("--keyboard", action="store_true", default=False)
     args = parser.parse_args()
 
     rclpy.init(args=None)
@@ -189,7 +292,9 @@ def main():
         hz=args.hz,
         base_frame=args.base_frame,
         ee_frame=args.ee_frame,
-        joint_names=[n.strip() for n in args.joint_names.split(",")]
+        joint_names=[n.strip() for n in args.joint_names.split(",")],
+        freedrive_on_start=args.freedrive_on_start,
+        enable_keyboard=args.keyboard,
     )
     try:
         rclpy.spin(node)

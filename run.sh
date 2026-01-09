@@ -16,12 +16,12 @@ ros2 run tf2_ros static_transform_publisher \
 
 # 2.2 collect dataset
 # 2.2.1 kinesthetic teaching mode
-python3 /home/sungboo/rb10_control/scripts/rb10_controller.py
+# python3 /home/sungboo/rb10_control/scripts/rb10_controller.py # 초기 위치 이동 필요시
 
 python3 /home/sungboo/rb10_control/scripts/rb10_demo_recorder_bridge.py
 
 cd /home/sungboo/rb10_control/dataset
-ros2 bag record /tf /rb/joint_states /rb/tcp_pose /rb/freedrive /rb/ee_wrench /camera/camera/color/image_raw
+ros2 bag record /tf /rb/joint_states /rb/tcp_pose /rb/ee_wrench /rb/stroke_event /camera/camera/color/image_raw
 
 python3 /home/sungboo/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
   --folder /home/sungboo/rb10_control/dataset/251017_kin_3 \
