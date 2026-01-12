@@ -6,7 +6,7 @@ rbpodo -> ROS2 bridge (for rosbag)
 - Reads rb.CobotData(IP)
 - Publishes:
   /rb/joint_states      sensor_msgs/JointState        (rad)
-  /rb/tcp_pose          geometry_msgs/PoseStamped     (m + quaternion xyzw)
+  /rb/ee_pose           geometry_msgs/PoseStamped     (m + quaternion xyzw)
   /rb/ee_wrench         geometry_msgs/WrenchStamped   (if available)
   /rb/stroke_event      std_msgs/String               (annotation for strokes, freedrive can be toggled via rbpodo command (not published as a ROS topic))
 """
@@ -91,7 +91,7 @@ class RbBridge(Node):
 
         # pubs
         self.pub_js = self.create_publisher(JointState, "/rb/joint_states", DEFAULT_QOS)
-        self.pub_pose = self.create_publisher(PoseStamped, "/rb/tcp_pose", DEFAULT_QOS)
+        self.pub_pose = self.create_publisher(PoseStamped, "/rb/ee_pose", DEFAULT_QOS)
         self.pub_wrench = self.create_publisher(WrenchStamped, "/rb/ee_wrench", DEFAULT_QOS)
         self.pub_stroke_event = self.create_publisher(String, "/rb/stroke_event", DEFAULT_QOS)
 
@@ -160,12 +160,12 @@ class RbBridge(Node):
         except Exception as e:
             self.get_logger().warn(f"JointState publish failed: {e}")
 
-        # --- TCP Pose ---
+        # --- EE Pose ---
         try:
             pose_msg = tcp_to_pose_msg(self, [s.tcp_pos[i] for i in range(6)], self.base_frame, self.ee_frame)
             self.pub_pose.publish(pose_msg)
         except Exception as e:
-            self.get_logger().warn(f"TCP pose publish failed: {e}")
+            self.get_logger().warn(f"EE pose publish failed: {e}")
 
         # --- Wrench (있을 때만) ---
         try:

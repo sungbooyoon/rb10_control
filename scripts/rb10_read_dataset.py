@@ -108,7 +108,8 @@ def plot_multichannel(name: str, arr: np.ndarray, t: np.ndarray, max_dims: int =
 def main():
     ap = argparse.ArgumentParser(description="robomimic HDF5 개요 + demo_0 첫 값 + 멀티플롯")
     ap.add_argument("--hdf5", required=True, help="HDF5 경로")
-    ap.add_argument("--max-dims", type=int, default=32, help="플롯에 표시할 최대 채널 수(너무 많을 때 제한)")
+    ap.add_argument("--max-dims", type=int, default=30, help="플롯에 표시할 최대 채널 수(너무 많을 때 제한)")
+    ap.add_argument("--skill-id", type=str, default=None, help="Plot only demos in /data/mask/skill_<id> (e.g., 1 -> skill_1)")
     args = ap.parse_args()
 
     with h5py.File(args.hdf5, "r") as f:
@@ -137,15 +138,17 @@ def main():
         print("num_samples:", N)
         print("datasets:", list(demo.keys()))
 
-        # meta에서 hz 가져오기 (없으면 1.0Hz)
-        hz = 1.0
+        # time axis: prefer meta['ref_ts'] if present; else fallback to sample index
+        t = np.arange(N, dtype=np.float64)
         if "meta" in demo.attrs:
             try:
                 meta = json.loads(demo.attrs["meta"])
-                hz = float(meta.get("timeline_hz", hz))
+                ref_ts = meta.get("ref_ts", None)
+                if isinstance(ref_ts, list) and len(ref_ts) == N:
+                    t = np.asarray(ref_ts, dtype=np.float64)
+                    t = t - float(t[0])
             except Exception:
                 pass
-        t = np.arange(N, dtype=np.float64) / max(hz, 1e-9)
 
         # actions 첫 값
         if "actions" in demo:
@@ -164,47 +167,26 @@ def main():
             else:
                 print(f"  {k}: {first_value_str(arr)}")
 
-        """
-        # ----- 3. 플롯: actions + 각 obs(이미지 제외) -----
-        # actions
-        if "actions" in demo:
-            actions = np.asarray(demo["actions"])
-            plot_multichannel("actions", actions, t, max_dims=args.max_dims)
-
-        # obs/*
-        for k in obs.keys():
-            arr = np.asarray(obs[k])
-            if is_image_array(arr):
-                continue  # 이미지 제외
-            name = f"obs/{k}"
-            # (N,) 또는 (N,D)만 처리
-            if arr.ndim == 1 or arr.ndim == 2:
-                plot_multichannel(name, arr, t, max_dims=args.max_dims)
-            else:
-                # 예: (N,7) 같은 건 위에서 잡힘. 더 높은 차원(HWC 등)은 스킵.
-                try:
-                    flat = arr.reshape(arr.shape[0], -1)
-                    plot_multichannel(name, flat, t, max_dims=args.max_dims)
-                except Exception:
-                    print(f"[skip] {name}: shape={arr.shape}는 선 그래프에 부적합하여 스킵합니다.")
-
-        # ---- ee_pose 3D 시각화 (자동 탐지) ----
-        ee_arr = np.asarray(obs["ee_pos"])
-        # (N, >=3) 보장되면 그대로
-        if ee_arr.ndim == 1:
-            ee_arr = ee_arr.reshape(-1, 1)
-        if ee_arr.shape[1] >= 3:
-            plot_ee_pose_3d(f"obs/ee_pos", ee_arr, t)
-        else:
-            print(f"[skip] obs/ee_pos: shape={ee_arr.shape} -> 최소 (N,3) 필요")
-        
-        plt.show()
-        """
-
-        # ----- 4. 모든 demo의 ee_pos 궤적을 한 그림에 -----
+        # ----- 3. 모든 demo의 ee_pos 궤적을 한 그림에 -----
         fig3d = plt.figure(figsize=(6, 6))
         ax3d = fig3d.add_subplot(111, projection="3d")
-        ax3d.set_title("All demos: ee_pos trajectories")
+
+        # Apply skill mask if requested
+        selected_demo_keys = demo_keys
+        if args.skill_id is not None:
+            mask_key = f"skill_{str(args.skill_id)}"
+            if "mask" in data and mask_key in data["mask"]:
+                selected_demo_keys = [s.decode("utf-8") if isinstance(s, (bytes, bytearray)) else str(s) for s in list(data["mask"][mask_key][...])]
+                selected_demo_keys = [k for k in selected_demo_keys if k in data]
+                ax3d.set_title(f"Skill {args.skill_id}: ee_pos trajectories ({len(selected_demo_keys)} demos)")
+                print(f"Selected demos: {selected_demo_keys}")
+            else:
+                print(f"[WARN] mask not found: /data/mask/{mask_key}. Falling back to all demos.")
+                selected_demo_keys = demo_keys
+                ax3d.set_title("All demos: ee_pos trajectories")
+        else:
+            ax3d.set_title("All demos: ee_pos trajectories")
+
         ax3d.set_xlabel("x [m]")
         ax3d.set_ylabel("y [m]")
         ax3d.set_zlabel("z [m]")
@@ -213,11 +195,11 @@ def main():
         plotted_any = False
         all_X, all_Y, all_Z = [], [], []
 
-        for demo_key in demo_keys:
+        for demo_key in selected_demo_keys:
             demo_i = data[demo_key]
             if "obs" not in demo_i:
                 continue
-            obs_i = dem o_i["obs"]
+            obs_i = demo_i["obs"]
             if "ee_pos" not in obs_i:
                 print(f"[skip] {demo_key}: obs/ee_pos 없음")
                 continue
@@ -247,7 +229,10 @@ def main():
             ax3d.set_xlim(xmid - max_range, xmid + max_range)
             ax3d.set_ylim(ymid - max_range, ymid + max_range)
             ax3d.set_zlim(zmid - max_range, zmid + max_range)
-            ax3d.legend(fontsize=8, loc="best", ncol=2)
+            if len(selected_demo_keys) <= 12:
+                ax3d.legend(fontsize=8, loc="best", ncol=2)
+            else:
+                print(f"[note] {len(selected_demo_keys)} demos selected; legend omitted (too crowded).")
         else:
             print("[note] ee_pos 데이터를 가진 demo가 없습니다.")
 

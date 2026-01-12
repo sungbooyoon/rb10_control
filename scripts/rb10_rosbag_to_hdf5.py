@@ -15,7 +15,8 @@ Requirements:
 - numpy, h5py, opencv-python
 
 Conventions:
-- (Optional) keep only segments where /rb/freedrive == True if --freedrive-only.
+- Each stroke segment (start~end) from /rb/stroke_event becomes one demo_* trajectory.
+- next_obs is not stored (only obs).
 - OBS = separate ee_pos (m) and ee_quat (xyzw).
 - Per-demo action normalization via 99th percentile or user-provided scales.
 
@@ -42,11 +43,112 @@ from rosidl_runtime_py.utilities import get_message
 # ---------------- Topics ----------------
 DEFAULT_TOPICS = {
     "joint_states": "/rb/joint_states",          # sensor_msgs/msg/JointState
-    "tcp_pose": "/rb/tcp_pose",                  # geometry_msgs/msg/PoseStamped
-    "freedrive": "/rb/freedrive",                # std_msgs/msg/Bool (optional unless --freedrive-only)
+    "ee_pose": "/rb/ee_pose",                    # geometry_msgs/msg/PoseStamped
     "ee_wrench": "/rb/ee_wrench",                # geometry_msgs/msg/WrenchStamped (optional)
     "rgb": "/camera/camera/color/image_raw",     # sensor_msgs/msg/Image (optional)
+    "stroke_event": "/rb/stroke_event",          # std_msgs/msg/String (JSON with event,start/end,skill_id,stroke_id,timestamp)
 }
+# ---------------- Utils ----------------
+import re
+
+def ns_to_sec_float(ns: int) -> float:
+    return float(ns) * 1e-9
+
+def _parse_stroke_event_json(s: str) -> Optional[Dict]:
+    try:
+        obj = json.loads(s)
+        if not isinstance(obj, dict):
+            return None
+        if "event" not in obj:
+            return None
+        return obj
+    except Exception:
+        return None
+
+def extract_segments_from_stroke_events(stroke_timed_msgs: List[Tuple[float, object]]) -> List[Dict]:
+    """Return list of segments using bag-record time.
+
+    Args:
+        stroke_timed_msgs: list of (t_sec, msg) pairs from rosbag, sorted by time.
+
+    Returns:
+        segs: list of dicts {skill_id:str, stroke_id:int, t_start_sec:float, t_end_sec:float, t_start_ns:int, t_end_ns:int}
+              where t_* are derived from bag time.
+    """
+    segs: List[Dict] = []
+    open_seg: Optional[Dict] = None
+
+    for (t_sec, m) in stroke_timed_msgs:
+        obj = _parse_stroke_event_json(getattr(m, "data", ""))
+        if obj is None:
+            continue
+
+        ev = str(obj.get("event", "")).lower()
+        skill_id = str(obj.get("skill_id", ""))
+        stroke_id = int(obj.get("stroke_id", -1))
+
+        t_ns = int(round(float(t_sec) * 1e9))
+
+        if ev == "start":
+            open_seg = {
+                "skill_id": skill_id,
+                "stroke_id": stroke_id,
+                "t_start_sec": float(t_sec),
+                "t_end_sec": None,
+                "t_start_ns": int(t_ns),
+                "t_end_ns": None,
+            }
+
+        elif ev == "end":
+            if open_seg is None:
+                continue
+            # accept end that matches stroke_id when possible
+            if open_seg.get("stroke_id", -1) != -1 and stroke_id != -1 and stroke_id != open_seg.get("stroke_id"):
+                continue
+
+            open_seg["t_end_sec"] = float(t_sec)
+            open_seg["t_end_ns"] = int(t_ns)
+            if open_seg["t_end_ns"] is not None and open_seg["t_end_ns"] > open_seg["t_start_ns"]:
+                segs.append(open_seg)
+            open_seg = None
+
+    return segs
+
+def slice_demo_by_time_window(demo: Dict, t_start: float, t_end: float) -> Optional[Dict]:
+    """Slice a demo dict produced by process_single_bag to [t_start, t_end] based on demo['meta']['ref_ts'] seconds."""
+    ts = np.array(demo["meta"].get("ref_ts", []), dtype=np.float64)
+    if ts.size == 0:
+        return None
+    keep = np.logical_and(ts >= t_start, ts <= t_end)
+    if np.count_nonzero(keep) < 2:
+        return None
+
+    def _sl(x):
+        if x is None:
+            return None
+        return x[keep]
+
+    out = {
+        "N": int(np.count_nonzero(keep)),
+        "actions": _sl(demo["actions"]),
+        "rewards": np.zeros((int(np.count_nonzero(keep)),), dtype=np.float32),
+        "dones": np.concatenate([np.zeros((int(np.count_nonzero(keep))-1,), dtype=np.uint8), np.array([1], dtype=np.uint8)], axis=0),
+        "obs": {
+            "joint_pos": _sl(demo["obs"]["joint_pos"]),
+            "joint_vel": _sl(demo["obs"]["joint_vel"]),
+            "ee_pos": _sl(demo["obs"]["ee_pos"]),
+            "ee_quat": _sl(demo["obs"]["ee_quat"]),
+            "ee_wrench": _sl(demo["obs"]["ee_wrench"]) if demo["obs"].get("ee_wrench") is not None else None,
+            "rgb": _sl(demo["obs"]["rgb"]) if demo["obs"].get("rgb") is not None else None,
+        },
+        "meta": dict(demo["meta"]),
+    }
+    # update meta
+    out["meta"]["t_start"] = float(t_start)
+    out["meta"]["t_end"] = float(t_end)
+    out["meta"]["N_total_before_slice"] = int(demo["N"])
+    out["meta"]["ref_ts"] = ts[keep].tolist()
+    return out
 
 
 # ---------------- Utils ----------------
@@ -193,12 +295,10 @@ class BagReader:
 def process_single_bag(
     bag_uri: str,
     topics: Dict[str, str],
-    target_hz: float,
     sync_tol: float,
     image_resize: Optional[Tuple[int, int]],
     normalize_actions: bool,
     action_scale_json: Optional[str],
-    freedrive_only: bool,
 ) -> Optional[Dict]:
     """
     Returns a dict with fields necessary to write a demo, or None if skipped.
@@ -211,95 +311,93 @@ def process_single_bag(
         return None
 
     # required topics
-    required = [topics["joint_states"], topics["tcp_pose"]]
-    if freedrive_only:
-        required.append(topics["freedrive"])
+    required = [topics["joint_states"], topics["ee_pose"]]
     for rt in required:
         if rt not in reader.topic_map:
             print(f"[WARN] Missing required topic in {bag_uri}: {rt} -> SKIP", file=sys.stderr)
             return None
 
+    # stroke_event is required for slicing
+    if topics["stroke_event"] not in reader.topic_map:
+        print(f"[WARN] Missing required topic in {bag_uri}: {topics['stroke_event']} -> SKIP", file=sys.stderr)
+        return None
+
     # wanted topics
-    wanted = [topics["joint_states"], topics["tcp_pose"]]
-    if topics.get("freedrive") and topics["freedrive"] in reader.topic_map:
-        wanted.append(topics["freedrive"])
+    wanted = [topics["joint_states"], topics["ee_pose"], topics["stroke_event"]]
     if topics.get("ee_wrench"):
         wanted.append(topics["ee_wrench"])
     if topics.get("rgb"):
         wanted.append(topics["rgb"])
     data = reader.read_all(wanted)
 
-    # reference timeline from joint_states
+    # reference timeline from ee_pose (diffusion-policy style)
+    ep_times = np.array([t for (t, _) in data[topics["ee_pose"]]], dtype=np.float64)
+    ep_msgs = [m for (_, m) in data[topics["ee_pose"]]]
+    if ep_times.size < 2:
+        print(f"[WARN] Not enough ee_pose in {bag_uri} -> SKIP", file=sys.stderr)
+        return None
+
+    ref_ts = ep_times.copy()
+    ep_idx_ref = np.arange(len(ep_times), dtype=int)
+
+    # optional: drop samples with non-increasing timestamps
+    if ref_ts.size >= 2:
+        inc = np.concatenate([[True], np.diff(ref_ts) > 0], axis=0)
+        ref_ts = ref_ts[inc]
+        ep_idx_ref = ep_idx_ref[inc]
+
+    if len(ref_ts) < 2:
+        print(f"[WARN] Too few ee_pose samples in {bag_uri} after monotonic filter -> SKIP", file=sys.stderr)
+        return None
+
+    # joint_states aligned to ee_pose timeline
     js_times = np.array([t for (t, _) in data[topics["joint_states"]]], dtype=np.float64)
     js_msgs = [m for (_, m) in data[topics["joint_states"]]]
     if js_times.size < 2:
         print(f"[WARN] Not enough joint_states in {bag_uri} -> SKIP", file=sys.stderr)
         return None
 
-    t0, t1 = js_times[0], js_times[-1]
-    ref_ts = np.arange(t0, t1 + 1e-9, 1.0 / target_hz, dtype=np.float64) if target_hz > 0 else js_times.copy()
-
-    js_mask, js_idx = filter_pairs_by_tol(ref_ts, js_times, tol=sync_tol)
-    ref_ts = ref_ts[js_mask]
-    js_idx = js_idx[js_mask]
-    if len(ref_ts) < 2:
-        print(f"[WARN] Too few synchronized samples in {bag_uri} -> SKIP", file=sys.stderr)
-        return None
+    js_mask, js_map = filter_pairs_by_tol(ref_ts, js_times, tol=sync_tol)
 
     # joints
     q_list, name_order = [], None
-    for i in js_idx:
-        m = js_msgs[i]
-        if name_order is None:
-            name_order = list(m.name)
-        if list(m.name) != name_order:
-            mpos = {n: p for n, p in zip(m.name, m.position)}
-            q_list.append([mpos[n] for n in name_order])
-        else:
-            q_list.append(list(m.position))
-    q = np.asarray(q_list, dtype=np.float32)
-    qd = finite_diff(q, np.diff(ref_ts))
-
-    # freedrive alignment
-    freedrive = np.ones(len(ref_ts), dtype=bool)  # default keep-all
-    if topics.get("freedrive") in data:
-        fd_times = np.array([t for (t, _) in data[topics["freedrive"]]], dtype=np.float64)
-        fd_msgs = [m for (_, m) in data[topics["freedrive"]]]
-        if fd_times.size > 0:
-            fd_mask, fd_idx = filter_pairs_by_tol(ref_ts, fd_times, tol=sync_tol)
-            freedrive = np.zeros(len(ref_ts), dtype=bool)
-            valid = fd_mask.nonzero()[0]
-            freedrive[valid] = np.array([bool(fd_msgs[j].data) for j in fd_idx[fd_mask]], dtype=bool)
-        else:
-            freedrive = np.zeros(len(ref_ts), dtype=bool)
-
-        if freedrive_only and not np.any(freedrive):
-            print(f"[WARN] No freedrive==True samples in {bag_uri} -> SKIP", file=sys.stderr)
-            return None
-    else:
-        if freedrive_only:
-            print(f"[WARN] freedrive_only=True but topic missing in {bag_uri} -> SKIP", file=sys.stderr)
-            return None
-
-    # tcp pose -> pos + quat(xyzw)
-    tp_times = np.array([t for (t, _) in data[topics["tcp_pose"]]], dtype=np.float64)
-    tp_msgs = [m for (_, m) in data[topics["tcp_pose"]]]
-    tp_mask, tp_idx = filter_pairs_by_tol(ref_ts, tp_times, tol=sync_tol)
-    pos = np.zeros((len(ref_ts), 3), dtype=np.float64)
-    quat_xyzw = np.zeros((len(ref_ts), 4), dtype=np.float64)
-    last_p = None
     last_q = None
     for i in range(len(ref_ts)):
-        if tp_mask[i]:
-            m = tp_msgs[tp_idx[i]]
-            p = m.pose.position
-            q_wxyz = (m.pose.orientation.w, m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z)
-            pos[i] = [p.x, p.y, p.z]
-            quat_xyzw[i] = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]], dtype=np.float64)  # xyzw
-            last_p, last_q = pos[i], quat_xyzw[i]
-        else:
-            if last_p is not None:
-                pos[i], quat_xyzw[i] = last_p, last_q
+        if js_mask[i]:
+            m = js_msgs[js_map[i]]
+            if name_order is None:
+                name_order = list(m.name)
+            if list(m.name) != name_order:
+                mpos = {n: p for n, p in zip(m.name, m.position)}
+                cur = np.array([mpos.get(n, 0.0) for n in name_order], dtype=np.float32)
+            else:
+                cur = np.array(list(m.position), dtype=np.float32)
+            last_q = cur
+        if last_q is None:
+            # initialize with first available joint state
+            # find first true in js_mask
+            j0 = next((k for k, v in enumerate(js_mask) if v), None)
+            if j0 is None:
+                print(f"[WARN] No joint_states within sync_tol in {bag_uri} -> SKIP", file=sys.stderr)
+                return None
+            m0 = js_msgs[js_map[j0]]
+            name_order = list(m0.name)
+            last_q = np.array(list(m0.position), dtype=np.float32)
+        q_list.append(last_q.copy())
+
+    q = np.asarray(q_list, dtype=np.float32)
+    dt = np.diff(ref_ts)
+    qd = finite_diff(q, dt)
+
+    # ee pose -> pos + quat(xyzw) (direct from reference timeline)
+    pos = np.zeros((len(ref_ts), 3), dtype=np.float64)
+    quat_xyzw = np.zeros((len(ref_ts), 4), dtype=np.float64)
+    for i in range(len(ref_ts)):
+        m = ep_msgs[ep_idx_ref[i]]
+        p = m.pose.position
+        q_wxyz = (m.pose.orientation.w, m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z)
+        pos[i] = [p.x, p.y, p.z]
+        quat_xyzw[i] = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]], dtype=np.float64)  # xyzw
 
     # optional wrench
     ee_wrench = None
@@ -344,8 +442,6 @@ def process_single_bag(
     valid_pose = np.logical_and(np.isfinite(pos).all(axis=1), np.isfinite(quat_xyzw).all(axis=1))
     nonzero_pose = np.logical_or((np.linalg.norm(pos, axis=1) > 0.0), (np.linalg.norm(quat_xyzw, axis=1) > 0.0))
     keep = np.logical_and(valid_pose, nonzero_pose)
-    if freedrive_only:
-        keep = np.logical_and(keep, freedrive)
 
     if np.count_nonzero(keep) < 2:
         print(f"[WARN] Too few samples after filtering in {bag_uri} -> SKIP", file=sys.stderr)
@@ -410,14 +506,15 @@ def process_single_bag(
         normalize=normalize_actions, given_scale9=given_scale
     )
 
-    # ----- obs / next_obs -----
-    def shift_next(x: Optional[np.ndarray]) -> Optional[np.ndarray]:
-        if x is None or len(x) <= 1:
-            return x
-        return np.concatenate([x[1:], x[-1:]], axis=0)
-
+    # ----- obs -----
     ee_pos  = pos.astype(np.float32)          # (N,3)
     ee_quat = quat_xyzw.astype(np.float32)    # (N,4) xyzw
+
+    # stroke_event messages as timed pairs
+    stroke_timed = data[topics["stroke_event"]]
+    if len(stroke_timed) < 2:
+        print(f"[WARN] Not enough stroke_event messages in {bag_uri} -> SKIP", file=sys.stderr)
+        return None
 
     demo = {
         "N": len(ref_ts),
@@ -432,32 +529,30 @@ def process_single_bag(
             "ee_wrench": ee_wrench.astype(np.float32) if ee_wrench is not None else None,
             "rgb": rgb.astype(np.uint8) if rgb is not None else None,
         },
-        "next_obs": {
-            "joint_pos": shift_next(q).astype(np.float32),
-            "joint_vel": shift_next(qd).astype(np.float32),
-            "ee_pos": shift_next(ee_pos).astype(np.float32),
-            "ee_quat": shift_next(ee_quat).astype(np.float32),
-            "ee_wrench": shift_next(ee_wrench).astype(np.float32) if ee_wrench is not None else None,
-            "rgb": shift_next(rgb).astype(np.uint8) if rgb is not None else None,
-        },
         "meta": {
             "topic_map": topics,
             "joint_names": name_order,
-            "timeline_hz": target_hz,
             "sync_tol": sync_tol,
             "action_type": "ee_delta_xyz + rot6d_rel",
             "action_format": "actions = [Δx,Δy,Δz, r11,r21,r31, r12,r22,r32]",
             "action_dim": 9,
             "action_scale": action_scale.tolist() if action_scale is not None else None,  # len 9 or None
             "bag_uri": bag_uri,
-            "freedrive_only": bool(freedrive_only),
+            "ref_ts": ref_ts.tolist(),
+            "stroke_events": [{"t_sec": float(t), "data": getattr(m, "data", "")} for (t, m) in stroke_timed],
         }
     }
-    return demo
+
+    segments = extract_segments_from_stroke_events(stroke_timed)
+    if not segments:
+        print(f"[WARN] No valid stroke segments in {bag_uri} -> SKIP", file=sys.stderr)
+        return None
+
+    return {"demo": demo, "segments": segments}
 
 
 # ---------------- Writer ----------------
-def write_many_demos(out_path: str, demos: List[Dict], env_name: str, env_type: str, env_kwargs: Dict):
+def write_many_demos(out_path: str, demos: List[Dict]):
     """
     Write demos into a robomimic HDF5 with tqdm progress.
     """
@@ -469,20 +564,34 @@ def write_many_demos(out_path: str, demos: List[Dict], env_name: str, env_type: 
     with h5py.File(out_path, "w") as f:
         g_data = f.create_group("data")
         g_data.attrs["env_args"] = json.dumps({
-            "name": env_name,
-            "type": env_type,
-            "env_name": env_name,
-            "env_type": env_type,
-            "env_kwargs": env_kwargs or {},
+            "name": "KinestheticTask",
+            "type": "gym",
+            "env_name": "KinestheticTask",
+            "env_type": "gym",
+            "env_kwargs": {},
         })
 
         total = 0
+        # --- 1) Skill mask accumulator ---
+        skill_to_demos: Dict[str, List[str]] = {}
+
         iterator = enumerate(demos)
         if tqdm is not None:
             iterator = tqdm(iterator, total=len(demos), desc="Writing demos", unit="demo")
 
         for k, demo in iterator:
             name = f"demo_{k}"
+
+            # --- 2) Collect skill mask entries (skill_id stored in meta during slicing) ---
+            try:
+                meta = demo.get("meta", {})
+                sid = meta.get("skill_id", None)
+                if sid is not None and str(sid) != "":
+                    key = f"skill_{str(sid)}"
+                    skill_to_demos.setdefault(key, []).append(name)
+            except Exception:
+                pass
+
             g = g_data.create_group(name)
             N = int(demo["N"])
 
@@ -504,22 +613,18 @@ def write_many_demos(out_path: str, demos: List[Dict], env_name: str, env_type: 
             if demo["obs"]["rgb"] is not None:
                 go.create_dataset("rgb", data=demo["obs"]["rgb"], compression="gzip", compression_opts=4)
 
-            # next_obs
-            gn = g.create_group("next_obs")
-            gn.create_dataset("joint_pos", data=demo["next_obs"]["joint_pos"])
-            gn.create_dataset("joint_vel", data=demo["next_obs"]["joint_vel"])
-            gn.create_dataset("ee_pos",  data=demo["next_obs"]["ee_pos"])
-            gn.create_dataset("ee_quat", data=demo["next_obs"]["ee_quat"])
-            if demo["next_obs"]["ee_wrench"] is not None:
-                gn.create_dataset("ee_wrench", data=demo["next_obs"]["ee_wrench"])
-            if demo["next_obs"]["rgb"] is not None:
-                gn.create_dataset("rgb", data=demo["next_obs"]["rgb"], compression="gzip", compression_opts=4)
-
             g.attrs["meta"] = json.dumps(demo["meta"])
             total += N
 
             if tqdm is not None:
                 iterator.set_postfix_str(f"{name} N={N}")
+
+        # --- 3) Write robomimic-style masks ---
+        if len(skill_to_demos) > 0:
+            g_mask = g_data.create_group("mask")
+            for key in sorted(skill_to_demos.keys()):
+                demo_names = np.array(skill_to_demos[key], dtype=h5py.string_dtype(encoding="utf-8"))
+                g_mask.create_dataset(key, data=demo_names)
 
         g_data.attrs["total"] = int(total)
 
@@ -544,7 +649,6 @@ def parse_args():
     p = argparse.ArgumentParser(description="Convert all bags in a folder to a single robomimic HDF5 (demo_0, demo_1, ...)")
     p.add_argument("--folder", required=True, help="Folder containing ROS2 bag files (.mcap/.db3) or bag dirs (with metadata.yaml)")
     p.add_argument("--out", required=True, help="Output HDF5 file")
-    p.add_argument("--hz", type=float, default=30.0, help="Target resample Hz (joint_states reference)")
     p.add_argument("--sync-tol", type=float, default=0.05, help="Max time diff (sec) for nearest sync")
     p.add_argument("--image-resize", nargs=2, type=int, default=None, metavar=("H", "W"),
                    help="Resize RGB to (H W); omit to keep original")
@@ -552,30 +656,11 @@ def parse_args():
     p.add_argument("--no-normalize-actions", action="store_false", dest="normalize_actions")
     p.add_argument("--action-scale-json", type=str, default=None,
                    help='JSON list of 9 scales for [dX,dY,dZ, rot6d(6)], e.g. "[0.02,0.02,0.02, 0.5,0.5,0.5, 0.5,0.5,0.5]"')
-    p.add_argument("--topic-joint-states", type=str, default=DEFAULT_TOPICS["joint_states"])
-    p.add_argument("--topic-tcp-pose", type=str, default=DEFAULT_TOPICS["tcp_pose"])
-    p.add_argument("--topic-freedrive", type=str, default=DEFAULT_TOPICS["freedrive"])
-    p.add_argument("--topic-ee-wrench", type=str, default=DEFAULT_TOPICS["ee_wrench"])
-    p.add_argument("--topic-rgb", type=str, default=DEFAULT_TOPICS["rgb"])
-    p.add_argument("--env-name", type=str, default="KinestheticTask")
-    p.add_argument("--env-type", type=str, default="gym")
-    p.add_argument("--env-kwargs", type=str, default=None, help="JSON string for env_kwargs")
-    p.add_argument("--freedrive-only", action="store_true", default=False,
-                   help="Use only samples where /rb/freedrive==True (requires freedrive topic).")
-    p.add_argument("--no-freedrive-only", action="store_false", dest="freedrive_only",
-                   help="Ignore freedrive and use all valid pose samples.")
     return p.parse_args()
 
 def main():
     args = parse_args()
-    topics = {
-        "joint_states": args.topic_joint_states,
-        "tcp_pose": args.topic_tcp_pose,
-        "freedrive": args.topic_freedrive,
-        "ee_wrench": args.topic_ee_wrench,
-        "rgb": args.topic_rgb,
-    }
-    env_kwargs = json.loads(args.env_kwargs) if args.env_kwargs else {}
+    topics = DEFAULT_TOPICS.copy()
 
     uris = discover_bag_uris(args.folder)
     if len(uris) == 0:
@@ -586,26 +671,35 @@ def main():
     demos: List[Dict] = []
     for uri in uris:
         print(f"[INFO] Processing: {uri}")
-        demo = process_single_bag(
+        res = process_single_bag(
             bag_uri=uri,
             topics=topics,
-            target_hz=args.hz,
             sync_tol=args.sync_tol,
             image_resize=tuple(args.image_resize) if args.image_resize else None,
             normalize_actions=args.normalize_actions,
             action_scale_json=args.action_scale_json,
-            freedrive_only=args.freedrive_only,
         )
-        if demo is not None:
-            demos.append(demo)
-        else:
+        if res is None:
             print(f"[INFO] Skipped: {uri}")
+            continue
+        base = res["demo"]
+        for seg in res["segments"]:
+            t_start = float(seg["t_start_sec"])
+            t_end = float(seg["t_end_sec"])
+            d = slice_demo_by_time_window(base, t_start, t_end)
+            if d is None:
+                continue
+            d["meta"]["skill_id"] = seg["skill_id"]
+            d["meta"]["stroke_id"] = int(seg["stroke_id"])
+            d["meta"]["t_start_ns"] = int(seg["t_start_ns"])
+            d["meta"]["t_end_ns"] = int(seg["t_end_ns"])
+            demos.append(d)
 
     if len(demos) == 0:
         print("[ERR] No valid demos produced.", file=sys.stderr)
         sys.exit(2)
 
-    write_many_demos(args.out, demos, args.env_name, args.env_type, env_kwargs)
+    write_many_demos(args.out, demos)
 
 if __name__ == "__main__":
     main()
