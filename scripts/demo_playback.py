@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RB10 Demo Playback (robomimic HDF5, action: Δpos(3) + 6D rot(6) in 'actions')
+Demo Playback (robomimic HDF5, action: Δpos(3) + 6D rot(6) in 'actions')
 - Loads a robomimic-compatible HDF5
 - Selects a trajectory group (demo_0, demo_1, ...)
 - Reconstructs absolute pose sequence by integrating:
@@ -197,7 +197,7 @@ def load_hdf5_for_actions(h5_path: str, demo_name: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RB10 Demo Playback from robomimic HDF5 (Δpos + 6D rel rot in 'actions', or fallback to obs)")
+    parser = argparse.ArgumentParser(description="Demo Playback from robomimic HDF5 (Δpos + 6D rel rot in 'actions', or fallback to obs)")
     parser.add_argument("--h5", type=str, required=True, help="Path to robomimic HDF5 file")
     parser.add_argument("--demo", type=str, required=True, help="Demo id: e.g., '3' or 'demo_3'")
     parser.add_argument("--execute", action="store_true", help="Send joint commands to robot")

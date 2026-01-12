@@ -18,12 +18,12 @@ ros2 run tf2_ros static_transform_publisher \
 # 2.2.1 kinesthetic teaching mode
 # python3 /home/sungboo/rb10_control/scripts/rb10_controller.py # 초기 위치 이동 필요시
 
-python3 /home/sungboo/rb10_control/scripts/rb10_demo_recorder_bridge.py
+python3 /home/sungboo/rb10_control/scripts/demo_recorder_bridge.py
 
 cd /home/sungboo/rb10_control/dataset
 ros2 bag record /tf /rb/joint_states /rb/tcp_pose /rb/ee_wrench /rb/stroke_event /camera/camera/color/image_raw
 
-python3 /home/sungboo/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
+python3 /home/sungboo/rb10_control/scripts/rosbag_to_hdf5.py \
   --folder /home/sungboo/rb10_control/dataset/251017_kin_3 \
   --out /home/sungboo/rb10_control/dataset/251017_kin_3.hdf5 \
   --no-normalize-actions --freedrive-only
@@ -34,14 +34,14 @@ python3 /home/sungboo/rb10_control/scripts/rb10_teleop.py
 
 ros2 bag record /tf /rb/joint_states /rb/tcp_pose /rb/freedrive /rb/ee_wrench /rb/teleop_delta /camera/camera/color/image_raw 
 
-python3 /home/sungboo/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
+python3 /home/sungboo/rb10_control/scripts/rosbag_to_hdf5.py \
   --folder /home/sungboo/rb10_control/dataset/251017_tel_1 \
   --out /home/sungboo/rb10_control/dataset/251017_tel_1.hdf5 \
   --no-normalize-actions --no-freedrive-only
 
 # 2.3 playback one demo
 ros2 launch rbpodo_moveit_config moveit.launch.py use_fake_hardware:=false
-python3 /home/sungboo/rb10_control/scripts/rb10_demo_playback.py \
+python3 /home/sungboo/rb10_control/scripts/demo_playback.py \
   --h5 /home/sungboo/rb10_control/dataset/251017_kin_3.hdf5 --demo demo_0 --execute
 
 
@@ -71,7 +71,7 @@ ros2 run tf2_ros static_transform_publisher \
 
 
 
-python3 /home/sungboo/rb10_control/scripts/rb10_rosbag_to_hdf5.py \
+python3 /home/sungboo/rb10_control/scripts/rosbag_to_hdf5.py \
   --folder /home/sungboo/rb10_control/dataset/251017_kin_3 \
   --out /home/sungboo/rb10_control/dataset/251017_kin_3.hdf5 \
   --no-normalize-actions --freedrive-only
