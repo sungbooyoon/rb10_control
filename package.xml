@@ -4,7 +4,7 @@
   <name>rb10_control</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="sungboo@todo.todo">sungboo</maintainer>
+  <maintainer email="sungbooyoon@gmail.com">sungboo</maintainer>
   <license>TODO: License declaration</license>
 
   <test_depend>ament_copyright</test_depend>
