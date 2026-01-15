@@ -207,26 +207,32 @@ def rotmat_to_6d(R: np.ndarray) -> np.ndarray:
     return np.concatenate([c1, c2], axis=0).astype(np.float64)
 
 def rosimg_to_rgb_numpy(msg) -> np.ndarray:
-    h, w = msg.height, msg.width
+    """Convert sensor_msgs/Image to HxWx3 uint8 RGB, handling row padding via msg.step."""
+    h, w = int(msg.height), int(msg.width)
+    step = int(getattr(msg, "step", w))
     data = np.frombuffer(msg.data, dtype=np.uint8)
-    enc = msg.encoding.lower()
+    enc = str(getattr(msg, "encoding", "")).lower()
+
+    def _rows_to_array(ch: int) -> np.ndarray:
+        row_bytes = w * ch
+        if step == row_bytes:
+            return data.reshape((h, w, ch))
+        rows = data.reshape((h, step))[:, :row_bytes]
+        return rows.reshape((h, w, ch))
+
     if enc == "rgb8":
-        return data.reshape((h, w, 3))
+        return _rows_to_array(3)
     if enc == "bgr8":
-        return cv2.cvtColor(data.reshape((h, w, 3)), cv2.COLOR_BGR2RGB)
+        return cv2.cvtColor(_rows_to_array(3), cv2.COLOR_BGR2RGB)
     if enc == "rgba8":
-        return cv2.cvtColor(data.reshape((h, w, 4)), cv2.COLOR_RGBA2RGB)
+        return cv2.cvtColor(_rows_to_array(4), cv2.COLOR_RGBA2RGB)
     if enc == "bgra8":
-        return cv2.cvtColor(data.reshape((h, w, 4)), cv2.COLOR_BGRA2RGB)
+        return cv2.cvtColor(_rows_to_array(4), cv2.COLOR_BGRA2RGB)
     if enc == "mono8":
-        return cv2.cvtColor(data.reshape((h, w)), cv2.COLOR_GRAY2RGB)
-    # fallback
-    arr = data.reshape((h, w, -1))
-    if arr.shape[2] == 3:
-        return arr
-    if arr.shape[2] == 4:
-        return cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
-    raise ValueError(f"Unsupported image encoding: {msg.encoding}")
+        gray = _rows_to_array(1).reshape((h, w))
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+
+    raise ValueError(f"Unsupported image encoding: {getattr(msg, 'encoding', None)}")
 
 def resize_if_needed(img_rgb: np.ndarray, target_hw: Optional[Tuple[int, int]]) -> np.ndarray:
     if not target_hw or target_hw[0] <= 0 or target_hw[1] <= 0:
@@ -269,7 +275,7 @@ class BagReader:
     def __init__(self, bag_uri: str):
         self.bag_uri = bag_uri
         self.reader = rosbag2_py.SequentialReader()
-        storage_options = rosbag2_py.StorageOptions(uri=bag_uri, storage_id="")  # autodetect
+        storage_options = rosbag2_py.StorageOptions(uri=bag_uri, storage_id="mcap")
         converter_options = rosbag2_py.ConverterOptions(input_serialization_format="cdr",
                                                         output_serialization_format="cdr")
         self.reader.open(storage_options, converter_options)
@@ -386,8 +392,7 @@ def process_single_bag(
         q_list.append(last_q.copy())
 
     q = np.asarray(q_list, dtype=np.float32)
-    dt = np.diff(ref_ts)
-    qd = finite_diff(q, dt)
+    qd = None  # placeholder
 
     # ee pose -> pos + quat(xyzw) (direct from reference timeline)
     pos = np.zeros((len(ref_ts), 3), dtype=np.float64)
@@ -450,7 +455,8 @@ def process_single_bag(
     # apply mask
     ref_ts = ref_ts[keep]
     q = q[keep]
-    qd = qd[keep]
+    dt = np.diff(ref_ts)
+    qd = finite_diff(q, dt)
     pos = pos[keep]
     quat_xyzw = quat_xyzw[keep]
     if ee_wrench is not None:
@@ -633,13 +639,11 @@ def write_many_demos(out_path: str, demos: List[Dict]):
 
 # ---------------- Helpers ----------------
 def discover_bag_uris(folder: str) -> List[str]:
+    """Discover rosbag2 directories under `folder` (metadata.yaml required)."""
     uris: List[str] = []
     for root, dirs, files in os.walk(folder):
         if "metadata.yaml" in files:
             uris.append(root)
-        for fn in files:
-            if fn.endswith(".mcap") or fn.endswith(".db3"):
-                uris.append(os.path.join(root, fn))
     uris = sorted(list(dict.fromkeys(uris)))
     return uris
 
@@ -647,13 +651,28 @@ def discover_bag_uris(folder: str) -> List[str]:
 # ---------------- CLI ----------------
 def parse_args():
     p = argparse.ArgumentParser(description="Convert all bags in a folder to a single robomimic HDF5 (demo_0, demo_1, ...)")
-    p.add_argument("--folder", required=True, help="Folder containing ROS2 bag files (.mcap/.db3) or bag dirs (with metadata.yaml)")
+    p.add_argument("--folder", required=True, help="Folder containing ROS2 bag directories (must include metadata.yaml; MCAP storage assumed)")
     p.add_argument("--out", required=True, help="Output HDF5 file")
     p.add_argument("--sync-tol", type=float, default=0.05, help="Max time diff (sec) for nearest sync")
     p.add_argument("--image-resize", nargs=2, type=int, default=None, metavar=("H", "W"),
                    help="Resize RGB to (H W); omit to keep original")
-    p.add_argument("--normalize-actions", action="store_true", default=True)
-    p.add_argument("--no-normalize-actions", action="store_false", dest="normalize_actions")
+    p.add_argument("--no-rgb", action="store_true", help="Do not load RGB images even if topic exists (saves memory).")
+
+    # action normalization (default: True)
+    g_norm = p.add_mutually_exclusive_group()
+    g_norm.add_argument(
+        "--normalize-actions",
+        dest="normalize_actions",
+        action="store_true",
+        help="Normalize per-demo actions to [-1,1] using 99th percentile (default).",
+    )
+    g_norm.add_argument(
+        "--no-normalize-actions",
+        dest="normalize_actions",
+        action="store_false",
+        help="Do not normalize actions; store raw deltas.",
+    )
+    p.set_defaults(normalize_actions=True)
     p.add_argument("--action-scale-json", type=str, default=None,
                    help='JSON list of 9 scales for [dX,dY,dZ, rot6d(6)], e.g. "[0.02,0.02,0.02, 0.5,0.5,0.5, 0.5,0.5,0.5]"')
     return p.parse_args()
@@ -661,6 +680,8 @@ def parse_args():
 def main():
     args = parse_args()
     topics = DEFAULT_TOPICS.copy()
+    if args.no_rgb:
+        topics["rgb"] = None
 
     uris = discover_bag_uris(args.folder)
     if len(uris) == 0:
@@ -675,7 +696,7 @@ def main():
             bag_uri=uri,
             topics=topics,
             sync_tol=args.sync_tol,
-            image_resize=tuple(args.image_resize) if args.image_resize else None,
+            image_resize=(tuple(args.image_resize) if (args.image_resize and not args.no_rgb) else None),
             normalize_actions=args.normalize_actions,
             action_scale_json=args.action_scale_json,
         )

@@ -6,7 +6,6 @@ import json
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  
 
 def _set_equal_aspect_3d(ax, X, Y, Z):
     """3D에서 x=y=z 등축으로 보이게 조정."""
@@ -52,11 +51,28 @@ def plot_ee_pose_3d(name: str, ee_pose: np.ndarray, t: np.ndarray):
     fig.tight_layout()
 
 
-def is_image_array(arr: np.ndarray) -> bool:
-    return arr.ndim >= 3 and arr.shape[-1] == 3
+def is_image_array(arr) -> bool:
+    """Return True if array/dataset looks like an image stack (N,H,W,3) or (H,W,3)."""
+    shape = getattr(arr, "shape", None)
+    if shape is None:
+        return False
+    if len(shape) >= 3 and int(shape[-1]) == 3:
+        return True
+    return False
 
-def first_value_str(arr: np.ndarray) -> str:
-    v = arr[0]
+def first_value_str(arr) -> str:
+    """Pretty-print the first element of an HDF5 dataset / numpy array."""
+    shape = getattr(arr, "shape", None)
+    if shape is not None and len(shape) > 0 and int(shape[0]) == 0:
+        return "<empty>"
+    try:
+        v = arr[0]
+    except Exception:
+        try:
+            v = np.asarray(arr)
+        except Exception:
+            return "<unreadable>"
+
     if isinstance(v, np.ndarray):
         if v.ndim == 0:
             return str(v.item())
@@ -67,6 +83,13 @@ def first_value_str(arr: np.ndarray) -> str:
             tail = np.array2string(v[-8:], precision=4, floatmode="fixed")
             return f"{head} ... {tail}"
         return f"<ndarray shape={v.shape} dtype={v.dtype}>"
+
+    # numpy scalar
+    try:
+        if np.isscalar(v):
+            return str(v)
+    except Exception:
+        pass
     return str(v)
 
 def plot_multichannel(name: str, arr: np.ndarray, t: np.ndarray, max_dims: int = 32):
@@ -138,29 +161,37 @@ def main():
         print("num_samples:", N)
         print("datasets:", list(demo.keys()))
 
-        # time axis: prefer meta['ref_ts'] if present; else fallback to sample index
+        # time axis: prefer demo['meta/ref_ts'] if present; else fallback to demo.attrs['meta']; else sample index
         t = np.arange(N, dtype=np.float64)
-        if "meta" in demo.attrs:
+        ref_ts = None
+        if "meta" in demo and "ref_ts" in demo["meta"]:
+            try:
+                ref_ts = np.asarray(demo["meta"]["ref_ts"][...], dtype=np.float64)
+            except Exception:
+                ref_ts = None
+        if ref_ts is None and "meta" in demo.attrs:
             try:
                 meta = json.loads(demo.attrs["meta"])
                 ref_ts = meta.get("ref_ts", None)
-                if isinstance(ref_ts, list) and len(ref_ts) == N:
-                    t = np.asarray(ref_ts, dtype=np.float64)
-                    t = t - float(t[0])
+                if isinstance(ref_ts, list):
+                    ref_ts = np.asarray(ref_ts, dtype=np.float64)
             except Exception:
-                pass
+                ref_ts = None
+        if isinstance(ref_ts, np.ndarray) and ref_ts.shape[0] == N:
+            t = ref_ts - float(ref_ts[0])
 
         # actions 첫 값
         if "actions" in demo:
-            a0 = demo["actions"][0]
             print("\n[action]:", first_value_str(demo["actions"]))
         else:
             print("\n[action]: <missing>")
 
         # obs 첫 값들
         print("\n[obs]")
+        if "obs" not in demo:
+            raise KeyError("demo_0에 'obs' 그룹이 없습니다.")
         obs = demo["obs"]
-        for k in obs.keys():
+        for k in sorted(list(obs.keys())):
             arr = obs[k]
             if is_image_array(arr):
                 print(f"  {k}: image shape={arr.shape}")
@@ -176,7 +207,14 @@ def main():
         if args.skill_id is not None:
             mask_key = f"skill_{str(args.skill_id)}"
             if "mask" in data and mask_key in data["mask"]:
-                selected_demo_keys = [s.decode("utf-8") if isinstance(s, (bytes, bytearray)) else str(s) for s in list(data["mask"][mask_key][...])]
+                raw = data["mask"][mask_key][...]
+                selected_demo_keys = []
+                for s in raw:
+                    if isinstance(s, (bytes, bytearray)):
+                        selected_demo_keys.append(s.decode("utf-8"))
+                    else:
+                        # numpy.str_ / python str / others
+                        selected_demo_keys.append(str(s))
                 selected_demo_keys = [k for k in selected_demo_keys if k in data]
                 ax3d.set_title(f"Skill {args.skill_id}: ee_pos trajectories ({len(selected_demo_keys)} demos)")
                 print(f"Selected demos: {selected_demo_keys}")

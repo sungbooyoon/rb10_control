@@ -41,9 +41,11 @@ DEFAULT_QOS = QoSProfile(
 )
 
 def deg2rad_list(a, n):
-    return np.deg2rad([float(a[i]) for i in range(n)], dtype=np.float64).tolist()
+    # rbpodo provides degrees; convert to radians (float64) and return python floats
+    arr = np.array([float(a[i]) for i in range(n)], dtype=np.float64)
+    return np.deg2rad(arr).astype(np.float64).tolist()
 
-def tcp_to_pose_msg(node: Node, tcp_pos_deg: list, base_frame: str, ee_frame: str) -> PoseStamped:
+def tcp_to_pose_msg(node: Node, tcp_pos_deg: list, base_frame: str, ee_frame: str, stamp=None) -> PoseStamped:
     """
     tcp_pos_deg: [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] (ZYX 회전 정의)
     PoseStamped: position[m], orientation(quat xyzw)
@@ -59,7 +61,7 @@ def tcp_to_pose_msg(node: Node, tcp_pos_deg: list, base_frame: str, ee_frame: st
 
     msg = PoseStamped()
     msg.header = Header()
-    msg.header.stamp = node.get_clock().now().to_msg()
+    msg.header.stamp = stamp if stamp is not None else node.get_clock().now().to_msg()
     msg.header.frame_id = base_frame
     msg.pose.position.x = x_m
     msg.pose.position.y = y_m
@@ -75,6 +77,8 @@ class RbBridge(Node):
         super().__init__("rbpodo_bridge")
         self.ip = ip
         self.hz = float(hz)
+        if self.hz <= 0.0:
+            raise ValueError(f"hz must be > 0, got {self.hz}")
         self.base_frame = base_frame
         self.ee_frame = ee_frame
         self.joint_names = joint_names
@@ -162,7 +166,7 @@ class RbBridge(Node):
 
         # --- EE Pose ---
         try:
-            pose_msg = tcp_to_pose_msg(self, [s.tcp_pos[i] for i in range(6)], self.base_frame, self.ee_frame)
+            pose_msg = tcp_to_pose_msg(self, [s.tcp_pos[i] for i in range(6)], self.base_frame, self.ee_frame, stamp=now)
             self.pub_pose.publish(pose_msg)
         except Exception as e:
             self.get_logger().warn(f"EE pose publish failed: {e}")
