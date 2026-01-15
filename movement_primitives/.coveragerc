@@ -1,0 +1,22 @@
+[run]
+branch = True
+source = movement_primitives
+omit =
+    */setup.py
+    movement_primitives/plot.py
+    movement_primitives/visualization.py
+    movement_primitives/testing/simulation.py
+
+[report]
+omit =
+    movement_primitives/plot.py
+    movement_primitives/visualization.py
+    movement_primitives/testing/simulation.py
+exclude_lines =
+    pragma: no cover
+    def plot_*
+    def _plot
+    except ImportError:
+    if verbose
+    if self.verbose
+    if __name__ == "__main__"

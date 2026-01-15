@@ -1,0 +1,11 @@
+pytransform3d
+cython
+numpy
+scipy
+matplotlib
+open3d
+tqdm
+gmr
+PyYAML
+numba
+pybullet

@@ -1,0 +1,30 @@
+<package>
+  <description brief="Movement primitive library.">
+    Implementations of movement primitives for imitation learning.
+  </description>
+  <author>Alexander Fabisch/Alexander.Fabisch@dfki.de</author>
+  <maintainer>Alexander Fabisch/Alexander.Fabisch@dfki.de</maintainer>
+  <license>BSD-3-clause</license>
+  <url>https://github.com/dfki-ric/movement_primitives</url>
+  <logo>none</logo>
+
+  <depend package="python" />
+  <depend package="python-pip" />
+  <depend package="python-matplotlib" />
+  <depend package="numpy" />
+  <depend package="scipy" />
+  <depend package="cython" />
+  <depend package="pyyaml" />
+  <depend package="pytransform3d" />
+
+  <keywords>
+    <keyword>Learning</keyword>
+  </keywords>
+  <stage>1</stage>
+  <use>multi project</use>
+  <activity>active</activity>
+  <classifiers>
+    <classifier>python</classifier>
+    <classifier>ubuntu</classifier>
+  </classifiers>
+</package>
