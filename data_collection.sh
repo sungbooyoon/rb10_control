@@ -3,7 +3,8 @@
 # setup robot and camera
 ros2 launch rbpodo_moveit_config moveit.launch.py use_fake_hardware:=false
 ros2 launch realsense2_camera rs_launch.py 
-ros2 run tf2_ros static_transform_publisher -0.062 -0.005 0  0.5 -0.5 -0.5 0.5  tcp camera_link
+ros2 run tf2_ros static_transform_publisher -0.0495 -0.005 0  0.5 -0.5 -0.5 0.5  tcp camera_link
+# 62mm - 25/2mm = 49.5mm
 
 # ============================================================
 # 2. Data Collection
