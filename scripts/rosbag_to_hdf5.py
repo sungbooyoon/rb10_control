@@ -45,7 +45,7 @@ DEFAULT_TOPICS = {
     "joint_states": "/rb/joint_states",          # sensor_msgs/msg/JointState
     "ee_pose": "/rb/ee_pose",                    # geometry_msgs/msg/PoseStamped
     "ee_wrench": "/rb/ee_wrench",                # geometry_msgs/msg/WrenchStamped (optional)
-    "rgb": "/camera/camera/color/image_raw",     # sensor_msgs/msg/Image (optional)
+    "rgb": "/camera/camera/color/image_rect_raw",     # sensor_msgs/msg/Image (optional)
     "stroke_event": "/rb/stroke_event",          # std_msgs/msg/String (JSON with event,start/end,skill_id,stroke_id,timestamp)
 }
 # ---------------- Utils ----------------

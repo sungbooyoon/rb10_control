@@ -104,7 +104,7 @@ class RbBridge(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # avoid TF collision with robot_state_publisher's tcp frame
-        self.ee_tf_frame = f"{self.ee_frame}_meas"   # e.g., tcp_meas
+        self.ee_tf_frame = f"{self.ee_frame}_rbpodo"   # e.g., tcp_rbpodo
 
         # timer
         self.timer = self.create_timer(1.0 / self.hz, self._on_timer)
@@ -177,11 +177,11 @@ class RbBridge(Node):
             pose_msg = tcp_to_pose_msg(self, tcp, self.base_frame, self.ee_frame, stamp=now)
             self.pub_pose.publish(pose_msg)
 
-            # broadcast TF using the same pose (avoid collision: tcp_meas)
+            # broadcast TF using the same pose (avoid collision: tcp_rbpodo)
             self._broadcast_ee_tf(
                 stamp_msg=now,
                 parent_frame=self.base_frame,
-                child_frame=self.ee_tf_frame,  # tcp_meas
+                child_frame=self.ee_tf_frame,  # tcp_rbpodo
                 x_m=pose_msg.pose.position.x,
                 y_m=pose_msg.pose.position.y,
                 z_m=pose_msg.pose.position.z,
