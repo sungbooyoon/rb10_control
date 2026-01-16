@@ -3,7 +3,7 @@
 # setup robot and camera
 ros2 launch rbpodo_moveit_config moveit.launch.py use_fake_hardware:=false
 ros2 launch realsense2_camera rs_launch.py 
-ros2 run tf2_ros static_transform_publisher -0.0495 -0.005 0  0.5 -0.5 -0.5 0.5  tcp camera_link
+ros2 run tf2_ros static_transform_publisher -0.0495 -0.005 0  0.5 -0.5 -0.5 0.5  tcp_meas camera_link
 # 62mm - 25/2mm = 49.5mm
 
 # ============================================================
@@ -17,11 +17,12 @@ cd /home/sungboo/rb10_control/dataset/raw
 ros2 bag record -o demo_$(date +%Y%m%d_%H%M%S) -s mcap \
   /tf \
   /rb/joint_states \
-  /rb/tcp_pose \
+  /rb/ee_pose \
   /rb/ee_wrench \
   /rb/stroke_event \
-  /camera/camera/color/image_raw \
-  /camera/camera/camera_info
+  /camera/camera/color/image_rect_raw \
+  /camera/camera/color/camera_info \
+  /camera/camera/depth/camera_info
 
 # ============================================================
 # 3. Results Processing
@@ -29,11 +30,11 @@ ros2 bag record -o demo_$(date +%Y%m%d_%H%M%S) -s mcap \
 cd /home/sungboo/rb10_control/dataset/raw
 ros2 bag record -o res_$(date +%Y%m%d_%H%M%S) -s mcap \
   /tf \
-  /camera/camera/color/image_raw \
-  /camera/camera/aligned_depth_to_color/image_raw \
+  /camera/camera/color/image_rect_raw \
+  /camera/camera/depth/image_rect_raw \
   /camera/camera/camera_info
 
-ros2 run image_view extract_images_sync --ros-args -p inputs:='[/camera/camera/color/image_raw, /camera/camera/aligned_depth_to_color/image_raw]'
+ros2 run image_view extract_images_sync --ros-args -p inputs:='[/camera/camera/color/image_rect_raw, /camera/camera/depth/image_rect_raw]'
 # 안되면 https://github.com/MapIV/ros2_bag_to_image/tree/master
 stitch img_dir/IMG*.jpg
 
@@ -45,7 +46,7 @@ cd /home/sungboo/rb10_control/dataset/raw
 ros2 bag record -o demo_$(date +%Y%m%d_%H%M%S) -s mcap \
   /tf \
   /rb/joint_states \
-  /rb/tcp_pose \
+  /rb/ee_pose \
   /rb/ee_wrench
 
 # ============================================================

@@ -28,7 +28,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 
 from std_msgs.msg import Header, String
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import PoseStamped, WrenchStamped
+from geometry_msgs.msg import PoseStamped, WrenchStamped, TransformStamped
+from tf2_ros import TransformBroadcaster
 
 from tf_transformations import quaternion_from_euler
 
@@ -99,6 +100,12 @@ class RbBridge(Node):
         self.pub_wrench = self.create_publisher(WrenchStamped, "/rb/ee_wrench", DEFAULT_QOS)
         self.pub_stroke_event = self.create_publisher(String, "/rb/stroke_event", DEFAULT_QOS)
 
+        # TF broadcaster (measured EE pose as TF)
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        # avoid TF collision with robot_state_publisher's tcp frame
+        self.ee_tf_frame = f"{self.ee_frame}_meas"   # e.g., tcp_meas
+
         # timer
         self.timer = self.create_timer(1.0 / self.hz, self._on_timer)
 
@@ -164,12 +171,28 @@ class RbBridge(Node):
         except Exception as e:
             self.get_logger().warn(f"JointState publish failed: {e}")
 
-        # --- EE Pose ---
+        # --- EE Pose + TF ---
         try:
-            pose_msg = tcp_to_pose_msg(self, [s.tcp_pos[i] for i in range(6)], self.base_frame, self.ee_frame, stamp=now)
+            tcp = [s.tcp_pos[i] for i in range(6)]
+            pose_msg = tcp_to_pose_msg(self, tcp, self.base_frame, self.ee_frame, stamp=now)
             self.pub_pose.publish(pose_msg)
+
+            # broadcast TF using the same pose (avoid collision: tcp_meas)
+            self._broadcast_ee_tf(
+                stamp_msg=now,
+                parent_frame=self.base_frame,
+                child_frame=self.ee_tf_frame,  # tcp_meas
+                x_m=pose_msg.pose.position.x,
+                y_m=pose_msg.pose.position.y,
+                z_m=pose_msg.pose.position.z,
+                qx=pose_msg.pose.orientation.x,
+                qy=pose_msg.pose.orientation.y,
+                qz=pose_msg.pose.orientation.z,
+                qw=pose_msg.pose.orientation.w,
+            )
         except Exception as e:
-            self.get_logger().warn(f"EE pose publish failed: {e}")
+            self.get_logger().warn(f"EE pose/TF publish failed: {e}")
+
 
         # --- Wrench (있을 때만) ---
         try:
@@ -278,6 +301,21 @@ class RbBridge(Node):
                     time.sleep(0.1)
             except Exception as e:
                 self.get_logger().error(f"Keyboard loop error: {e}")
+
+    def _broadcast_ee_tf(self, stamp_msg, parent_frame: str, child_frame: str, x_m, y_m, z_m, qx, qy, qz, qw):
+        t = TransformStamped()
+        t.header.stamp = stamp_msg
+        t.header.frame_id = parent_frame
+        t.child_frame_id = child_frame
+        t.transform.translation.x = float(x_m)
+        t.transform.translation.y = float(y_m)
+        t.transform.translation.z = float(z_m)
+        t.transform.rotation.x = float(qx)
+        t.transform.rotation.y = float(qy)
+        t.transform.rotation.z = float(qz)
+        t.transform.rotation.w = float(qw)
+        self.tf_broadcaster.sendTransform(t)
+
 
 def main():
     parser = argparse.ArgumentParser(description="rbpodo -> ROS2 publishers (for rosbag)")
