@@ -52,10 +52,14 @@ ros2 bag record -o res_$(date +%Y%m%d_%H%M%S) -s mcap \
   /camera/camera/color/camera_info \
   /camera/camera/depth/camera_info
 
-ros2 run image_view extract_images_sync --ros-args -p inputs:='[/camera/camera/color/image_rect_raw, /camera/camera/depth/image_rect_raw]'
+# ros2 run image_view extract_images_sync --ros-args -p inputs:='[/camera/camera/color/image_rect_raw, /camera/camera/depth/image_rect_raw]'
+ros2 launch ros2_bag_to_image bag_to_image.xml \
+        input/path:=/home/sungboo/rb10_control/dataset/raw/demo_20260119_174306 \
+        input/topics:="['/camera/camera/color/image_rect_raw', '/camera/camera/depth/image_rect_raw']" \
+        output/path:=/home/sungboo/rb10_control/dataset/raw/img_dir
 # 안되면 https://github.com/MapIV/ros2_bag_to_image/tree/master
 stitch img_dir/IMG*.jpg
-
+``
 # ============================================================
 # 4. Replay and Collect
 python3 /home/sungboo/rb10_control/scripts/rosbag_replay.py --bag /path/to/bag_folder
