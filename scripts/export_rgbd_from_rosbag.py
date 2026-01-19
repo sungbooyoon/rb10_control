@@ -2,18 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-Export color/depth frames + camera_info json from a ROS2 rosbag2.
+Export color/depth frames + camera_info json from a ROS2 rosbag2 (MCAP).
 
 Input:
-  - rosbag2 file (e.g., res_YYYYmmdd_HHMMSS.bag)
+  - rosbag2 directory (e.g., /path/to/res_YYYYmmdd_HHMMSS/)
+    which contains:
+      metadata.yaml
+      *.mcap
 
 Reads:
-  - /camera/camera/color/image_raw
-  - /camera/camera/aligned_depth_to_color/image_raw
-  - /camera/camera/camera_info
+  - /camera/camera/color/image_rect_raw
+  - /camera/camera/depth/image_rect_raw
+  - /camera/camera/color/camera_info
 
 Outputs:
-  <out_root>/<bag_name>/
+  <out_root>/<bag_dir_name>/
     camera_info.json
     color/  000000_1700000000.123456789.png ...
     depth/  000000_1700000000.123456789.png ...  (16-bit PNG if depth is 16UC1 / 32FC1)
@@ -39,22 +42,18 @@ from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 
 
-TOPIC_COLOR = "/camera/camera/color/image_raw"
-TOPIC_DEPTH = "/camera/camera/aligned_depth_to_color/image_raw"
-TOPIC_INFO  = "/camera/camera/camera_info"
+TOPIC_COLOR = "/camera/camera/color/image_rect_raw"
+TOPIC_DEPTH = "/camera/camera/depth/image_rect_raw"
+TOPIC_INFO  = "/camera/camera/color/camera_info"
 
 
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
 
 
-def ns_to_sec(ns: int) -> float:
-    return float(ns) * 1e-9
-
-
 def image_msg_to_bgr8(msg):
     """Convert sensor_msgs/Image to BGR uint8 OpenCV image."""
-    # cv_bridge if available
+    # Prefer cv_bridge if available
     try:
         from cv_bridge import CvBridge
         bridge = CvBridge()
@@ -89,17 +88,15 @@ def depth_msg_to_png16(msg) -> np.ndarray:
     w = int(msg.width)
     enc = str(msg.encoding).lower()
 
-    if enc in ("16uc1",):
+    if enc == "16uc1":
         d = np.frombuffer(msg.data, dtype=np.uint16).reshape(h, w)
         return d
 
-    if enc in ("32fc1",):
+    if enc == "32fc1":
         d = np.frombuffer(msg.data, dtype=np.float32).reshape(h, w)
-        # meters -> mm
         mm = np.clip(d * 1000.0, 0.0, 65535.0)
         return mm.astype(np.uint16)
 
-    # Sometimes depth could be 16SC1 etc; extend if needed
     raise ValueError(f"Unsupported depth encoding: {msg.encoding}")
 
 
@@ -128,13 +125,24 @@ def camera_info_to_dict(msg) -> dict:
     }
 
 
-def open_reader(bag_uri: str) -> SequentialReader:
-    if not os.path.isdir(bag_uri):
-        raise FileNotFoundError(f"Bag URI must be an existing directory for rosbag2_py: {bag_uri}")
+def open_reader(bag_dir: str) -> SequentialReader:
+    """
+    Open rosbag2 directory recorded with MCAP.
+    bag_dir should contain metadata.yaml and *.mcap.
+    """
+    if not os.path.isdir(bag_dir):
+        raise FileNotFoundError(f"--bag must be an existing rosbag2 directory: {bag_dir}")
+
+    metadata = os.path.join(bag_dir, "metadata.yaml")
+    if not os.path.isfile(metadata):
+        raise FileNotFoundError(f"metadata.yaml not found in bag dir: {bag_dir}")
+
     reader = SequentialReader()
-    storage_options = StorageOptions(uri=bag_uri, storage_id="sqlite3")
-    converter_options = ConverterOptions(input_serialization_format="cdr",
-                                         output_serialization_format="cdr")
+    storage_options = StorageOptions(uri=bag_dir, storage_id="mcap")
+    converter_options = ConverterOptions(
+        input_serialization_format="cdr",
+        output_serialization_format="cdr",
+    )
     reader.open(storage_options, converter_options)
     return reader
 
@@ -148,42 +156,35 @@ def get_topic_types(reader: SequentialReader) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bag", required=True, help="path to a bag file (e.g., .../res_YYYYmmdd_HHMMSS.bag)")
-    ap.add_argument("--out-root", default="/home/sungboo/rb10_control/dataset",
-                    help="root output directory")
+    ap.add_argument("--bag", required=True, help="path to rosbag2 directory (MCAP), e.g., .../res_YYYYmmdd_HHMMSS/")
     ap.add_argument("--hz", type=float, default=30.0, help="target sampling Hz (default 30)")
     args = ap.parse_args()
 
-    bag_file = os.path.abspath(args.bag)
-    if not os.path.isfile(bag_file):
-        raise FileNotFoundError(f"Bag file not found: {bag_file}")
-    bag_name = os.path.basename(bag_file)
-    out_name = bag_name[:-4] if bag_name.lower().endswith(".bag") else os.path.splitext(bag_name)[0]
-    bag_dir = os.path.dirname(bag_file)
-
-    out_dir = os.path.join(args.out_root, out_name)
-    out_color = os.path.join(out_dir, "color")
-    out_depth = os.path.join(out_dir, "depth")
-    ensure_dir(out_color)
-    ensure_dir(out_depth)
-
+    bag_dir = os.path.abspath(args.bag)
+    
     hz = float(args.hz)
     if hz <= 0:
         raise ValueError("--hz must be > 0")
     period_ns = int(round(1e9 / hz))
+
+    out_color = os.path.join(bag_dir, "color")
+    out_depth = os.path.join(bag_dir, "depth")
+    ensure_dir(out_color)
+    ensure_dir(out_depth)
 
     reader = open_reader(bag_dir)
     topic_types = get_topic_types(reader)
 
     for need in (TOPIC_COLOR, TOPIC_DEPTH, TOPIC_INFO):
         if need not in topic_types:
-            raise RuntimeError(f"Missing topic in bag: {need}\nAvailable: {list(topic_types.keys())}")
+            raise RuntimeError(
+                f"Missing topic in bag: {need}\nAvailable topics:\n- " + "\n- ".join(sorted(topic_types.keys()))
+            )
 
     ColorT = get_message(topic_types[TOPIC_COLOR])
     DepthT = get_message(topic_types[TOPIC_DEPTH])
     InfoT  = get_message(topic_types[TOPIC_INFO])
 
-    # caches
     latest_depth: Optional[Tuple[int, object]] = None  # (t_ns, msg)
     latest_color: Optional[Tuple[int, object]] = None  # (t_ns, msg)
     new_depth = False
@@ -195,21 +196,20 @@ def main():
     seen_color = 0
     seen_depth = 0
 
-    print(f"[info] bag_file={bag_file}")
-    print(f"[info] out_dir={out_dir}")
+    print(f"[info] bag_dir={bag_dir}")
     print(f"[info] target_hz={hz:.3f}  period={period_ns/1e6:.2f} ms")
     print("[info] saving color/depth pairs triggered by color frames")
+    print(f"[info] topics: color={TOPIC_COLOR}, depth={TOPIC_DEPTH}, info={TOPIC_INFO}")
 
     while reader.has_next():
         topic, data, t_ns = reader.read_next()
 
         if topic == TOPIC_INFO and not camera_info_saved:
             msg = deserialize_message(data, InfoT)
-            info_path = os.path.join(out_dir, "camera_info.json")
+            info_path = os.path.join(bag_dir, "camera_info.json")
             with open(info_path, "w", encoding="utf-8") as f:
                 json.dump(camera_info_to_dict(msg), f, indent=2)
             camera_info_saved = True
-            # keep going; no return because we still need images
             continue
 
         if topic == TOPIC_DEPTH:
@@ -221,27 +221,24 @@ def main():
         if topic != TOPIC_COLOR:
             continue
 
-        # color message (cache)
         latest_color = (t_ns, deserialize_message(data, ColorT))
         new_color = True
         seen_color += 1
 
-        # only save when both streams have new frames
         if (latest_depth is None) or (latest_color is None) or (not (new_color and new_depth)):
             continue
 
-        # sampling gate (based on color timestamp)
         if last_save_t_ns is not None and (t_ns - last_save_t_ns) < period_ns:
             continue
 
         _, msg_color = latest_color
         _, msg_depth = latest_depth
 
-        # convert + save
         try:
             bgr = image_msg_to_bgr8(msg_color)
             dep16 = depth_msg_to_png16(msg_depth)
         except Exception:
+            # If conversion fails for a frame, skip it
             continue
 
         sec = int(t_ns // 1_000_000_000)
@@ -266,9 +263,9 @@ def main():
             print(f"[info] saved {saved} pairs (seen_color={seen_color}, seen_depth={seen_depth})")
 
     if not camera_info_saved:
-        print("[warn] camera_info not found/never saved (topic existed but no messages?)")
+        print("[warn] camera_info topic existed but no messages were saved.")
 
-    print(f"[done] saved_pairs={saved}  out={out_dir}")
+    print(f"[done] saved_pairs={saved}  out={bag_dir}")
 
 
 if __name__ == "__main__":

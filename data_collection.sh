@@ -30,10 +30,11 @@ ros2 run apriltag_ros apriltag_node --ros-args \
 python3 /home/sungboo/rb10_control/scripts/demo_recorder_bridge.py --keyboard --freedrive-on-start
 
 # record ros2 bag
-mkdir -p /home/sungboo/rb10_control/dataset/raw
+# mkdir -p /home/sungboo/rb10_control/dataset/raw
 cd /home/sungboo/rb10_control/dataset/raw
 ros2 bag record -o demo_$(date +%Y%m%d_%H%M%S) -s mcap \
   /tf \
+  /tf_static \
   /rb/joint_states \
   /rb/ee_pose \
   /rb/ee_wrench \
@@ -47,18 +48,14 @@ ros2 bag record -o demo_$(date +%Y%m%d_%H%M%S) -s mcap \
 cd /home/sungboo/rb10_control/dataset/raw
 ros2 bag record -o res_$(date +%Y%m%d_%H%M%S) -s mcap \
   /tf \
+  /tf_static \
   /camera/camera/color/image_rect_raw \
   /camera/camera/depth/image_rect_raw \
   /camera/camera/color/camera_info \
   /camera/camera/depth/camera_info
 
-# ros2 run image_view extract_images_sync --ros-args -p inputs:='[/camera/camera/color/image_rect_raw, /camera/camera/depth/image_rect_raw]'
-ros2 launch ros2_bag_to_image bag_to_image.xml \
-        input/path:=/home/sungboo/rb10_control/dataset/raw/demo_20260119_174306 \
-        input/topics:="['/camera/camera/color/image_rect_raw', '/camera/camera/depth/image_rect_raw']" \
-        output/path:=/home/sungboo/rb10_control/dataset/raw/img_dir
-# 안되면 https://github.com/MapIV/ros2_bag_to_image/tree/master
-stitch img_dir/IMG*.jpg
+python3 /home/sungboo/rb10_control/scripts/export_rgbd_from_rosbag.py --bag "" --hz 10
+stitch --no-crop img_dir/IMG*.jpg 
 ``
 # ============================================================
 # 4. Replay and Collect
@@ -67,6 +64,7 @@ python3 /home/sungboo/rb10_control/scripts/demo_recorder_bridge.py
 cd /home/sungboo/rb10_control/dataset/raw
 ros2 bag record -o demo_$(date +%Y%m%d_%H%M%S) -s mcap \
   /tf \
+  /tf_static \
   /rb/joint_states \
   /rb/ee_pose \
   /rb/ee_wrench
