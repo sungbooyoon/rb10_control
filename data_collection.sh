@@ -15,7 +15,7 @@ ros2 launch easy_handeye2 calibrate.launch.py \
 # setup robot and camera
 # ros2 launch rbpodo_moveit_config moveit.launch.py use_fake_hardware:=false
 ros2 launch realsense2_camera rs_launch.py 
-ros2 run tf2_ros static_transform_publisher -0.03877 -0.009 0.20317  -0.5 0.5 -0.5 0.5  tcp_rbpodo camera_link
+ros2 run tf2_ros static_transform_publisher -0.20317 0.009 -0.00405  0 0 0 1  tcp_rbpodo camera_link
 
 # apriltag
 ros2 run apriltag_ros apriltag_node --ros-args \
