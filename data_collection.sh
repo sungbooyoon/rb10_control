@@ -23,10 +23,16 @@ ros2 run apriltag_ros apriltag_node --ros-args \
     -r camera_info:=/camera/camera/color/camera_info \
     --params-file /home/sungboo/ros2_ws/src/apriltag_ros/cfg/tags_36h11.yaml
 
+# (Run once) Apriltag detection test
+cd /home/sungboo/rb10_control/dataset/raw
+ros2 bag record -o apriltag_$(date +%Y%m%d_%H%M%S) -s mcap \
+  /tf \
+  /tf_static
+
 # ============================================================
 # 2. Data Collection
 # topic pusblisher
-python3 /home/sungboo/rb10_control/scripts/demo_recorder_bridge.py --keyboard --freedrive-on-start
+python3 /home/sungboo/rb10_control/scripts/demo_recorder_bridge.py --keyboard
 
 # record ros2 bag
 # mkdir -p /home/sungboo/rb10_control/dataset/raw

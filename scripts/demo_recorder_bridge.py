@@ -136,13 +136,16 @@ class RbBridge(Node):
         else:
             self.get_logger().info("First packet received.")
 
+        self._freedrive_enabled = False  # local state (best-effort)
         # Optional: set freedrive ON at start (command only; not published)
         if self.freedrive_on_start:
             try:
                 res = self.robot.set_freedrive_mode(self.rc, True)
+                self._freedrive_enabled = True
                 self.get_logger().info(f"Freedrive ON requested at start (res={res})")
             except Exception as e:
                 self.get_logger().warn(f"Failed to request freedrive ON at start: {e}")
+
 
     def _on_timer(self):
         # pull one packet
@@ -230,15 +233,30 @@ class RbBridge(Node):
         self.pub_stroke_event.publish(msg)
         self.get_logger().info(f"Stroke event published: {msg.data}")
 
+    def _set_freedrive(self, enable: bool, reason: str):
+        try:
+            res = self.robot.set_freedrive_mode(self.rc, enable)
+            self._freedrive_enabled = enable  # update only on success
+            self.get_logger().info(f"Freedrive {'ON' if enable else 'OFF'} requested ({reason}) (res={res})")
+            return True
+        except Exception as e:
+            self.get_logger().warn(f"Freedrive {'ON' if enable else 'OFF'} failed ({reason}): {e}")
+            return False
+
+    def _toggle_freedrive(self, reason: str):
+        target = not self._freedrive_enabled
+        return self._set_freedrive(target, reason)
+
+
     def _keyboard_loop(self):
         self.get_logger().info(
             "Keyboard input enabled. Commands:\n"
-            "  s<skill_id>  : start stroke (annotate, e.g. s1, s2, s10)\n"
-            "  e            : end stroke (annotate)\n"
-            "  on           : freedrive teach ON (rbpodo command)\n"
-            "  off          : freedrive teach OFF (rbpodo command)\n"
+            "  a            : toggle freedrive teach ON/OFF\n"
+            "  s<skill_id>  : start stroke + freedrive ON (e.g. s1, s2, s10)\n"
+            "  e            : end stroke + freedrive OFF\n"
             "  q            : quit"
         )
+
         while rclpy.ok():
             try:
                 if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
@@ -247,26 +265,14 @@ class RbBridge(Node):
                         continue
                     line = line.strip()
 
-                    if line == "on":
-                        try:
-                            res = self.robot.set_freedrive_mode(self.rc, True)
-                            self.get_logger().info(f"Freedrive ON requested (res={res})")
-                        except Exception as e:
-                            self.get_logger().warn(f"Freedrive ON failed: {e}")
+                    # toggle freedrive
+                    if line == "a":
+                        self._toggle_freedrive("manual toggle (a)")
                         continue
 
-                    if line == "off":
-                        try:
-                            res = self.robot.set_freedrive_mode(self.rc, False)
-                            self.get_logger().info(f"Freedrive OFF requested (res={res})")
-                        except Exception as e:
-                            self.get_logger().warn(f"Freedrive OFF failed: {e}")
-                        continue
-
-                    # stroke start: ONLY support `s<skill_id>` (no space)
+                    # stroke start
                     if line.startswith("s") and len(line) > 1:
                         skill_id = line[1:].strip()
-
                         if not skill_id:
                             self.get_logger().warn("Skill ID required after 's'")
                             continue
@@ -274,33 +280,53 @@ class RbBridge(Node):
                             self.get_logger().warn("Stroke already active. End current stroke before starting a new one.")
                             continue
 
-                        # on stroke start
+                        # Freedrive ON at stroke start (idempotent-ish)
+                        if not self._freedrive_enabled:
+                            self._set_freedrive(True, f"auto on stroke start (s{skill_id})")
+
                         self._stroke_id += 1
                         self._active_skill_id = skill_id
                         self._stroke_active = True
                         self._publish_stroke_event("start", self._active_skill_id, self._stroke_id)
                         continue
 
+                    # stroke end
                     if line == "e":
                         if not self._stroke_active:
                             self.get_logger().warn("No active stroke to end.")
                             continue
-                        # on stroke end
+
+                        # Freedrive OFF at stroke end
+                        if self._freedrive_enabled:
+                            self._set_freedrive(False, "auto on stroke end (e)")
+
                         self._stroke_active = False
                         self._publish_stroke_event("end", self._active_skill_id, self._stroke_id)
-                    elif line == "q":
+                        continue
+
+                    # quit
+                    if line == "q":
                         if self._stroke_active:
                             self._stroke_active = False
                             self._publish_stroke_event("end", self._active_skill_id, self._stroke_id)
+
+                        # safety: ensure OFF
+                        if self._freedrive_enabled:
+                            self._set_freedrive(False, "auto on quit (q)")
+
                         self.get_logger().info("Quitting...")
                         rclpy.shutdown()
                         break
-                    else:
-                        self.get_logger().warn(f"Unknown command: {line}")
+
+                    self.get_logger().warn(f"Unknown command: {line}")
+
                 else:
                     time.sleep(0.1)
+
             except Exception as e:
                 self.get_logger().error(f"Keyboard loop error: {e}")
+
+
 
     def _broadcast_ee_tf(self, stamp_msg, parent_frame: str, child_frame: str, x_m, y_m, z_m, qx, qy, qz, qw):
         t = TransformStamped()
