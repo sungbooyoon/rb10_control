@@ -24,10 +24,12 @@ ros2 run apriltag_ros apriltag_node --ros-args \
     --params-file /home/sungboo/ros2_ws/src/apriltag_ros/cfg/tags_36h11.yaml
 
 # (Run once) Apriltag detection test
+python3 /home/sungboo/rb10_control/scripts/demo_recorder_bridge.py
 cd /home/sungboo/rb10_control/dataset/raw
 ros2 bag record -o apriltag_$(date +%Y%m%d_%H%M%S) -s mcap \
   /tf \
-  /tf_static
+  /tf_static \
+  /rb/ee_pose
 
 # ============================================================
 # 2. Data Collection
@@ -78,4 +80,9 @@ ros2 bag record -o demo_$(date +%Y%m%d_%H%M%S) -s mcap \
 # 5. Data Post-processing
 # rosbag to hdf5
 # python3 /home/sungboo/rb10_control/scripts/read_dataset.py
-python3 /home/sungboo/rb10_control/scripts/rosbag_to_hdf5.py --folder "" --out "" --no-rgb
+python3 /home/sungboo/rb10_control/scripts/rosbag_to_hdf5.py \
+  --folder /home/sungboo/rb10_control/dataset/demo_20260122 \
+  --out /home/sungboo/rb10_control/dataset/demo_20260122.hdf5 --no-rgb
+python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
+  --hdf5 /home/sungboo/rb10_control/dataset/demo_20260122.hdf5 \
+  --out-dir /home/sungboo/rb10_control/images/demo_20260122/

@@ -6,6 +6,7 @@ import json
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 def _set_equal_aspect_3d(ax, X, Y, Z):
     """3D에서 x=y=z 등축으로 보이게 조정."""
@@ -49,6 +50,11 @@ def plot_ee_pose_3d(name: str, ee_pose: np.ndarray, t: np.ndarray):
     ax.grid(True, alpha=0.3)
     _set_equal_aspect_3d(ax, X, Y, Z)
     fig.tight_layout()
+    if out_dir is not None:
+        os.makedirs(out_dir, exist_ok=True)
+        fname = os.path.join(out_dir, f"{name}_3d.png")
+        fig.savefig(fname, dpi=200)
+        print(f"[saved] {fname}")
 
 
 def is_image_array(arr) -> bool:
@@ -106,6 +112,11 @@ def plot_multichannel(name: str, arr: np.ndarray, t: np.ndarray, max_dims: int =
         ax.set_ylabel("value")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
+        if out_dir is not None:
+            os.makedirs(out_dir, exist_ok=True)
+            fname = os.path.join(out_dir, f"{name}.png")
+            fig.savefig(fname, dpi=200)
+            print(f"[saved] {fname}")
         return
 
     if arr.ndim >= 2:
@@ -125,6 +136,12 @@ def plot_multichannel(name: str, arr: np.ndarray, t: np.ndarray, max_dims: int =
                 ax.set_xlabel("time [s]")
             ax.grid(True, alpha=0.3)
         fig.tight_layout()
+        if out_dir is not None:
+            os.makedirs(out_dir, exist_ok=True)
+            fname = os.path.join(out_dir, f"{name}.png")
+            fig.savefig(fname, dpi=200)
+            print(f"[saved] {fname}")
+
         if D > D_plot:
             print(f"[note] {name}: {D}차원 중 {D_plot}개만 표시했습니다 (max_dims={max_dims}).")
 
@@ -133,6 +150,7 @@ def main():
     ap.add_argument("--hdf5", required=True, help="HDF5 경로")
     ap.add_argument("--max-dims", type=int, default=30, help="플롯에 표시할 최대 채널 수(너무 많을 때 제한)")
     ap.add_argument("--skill-id", type=str, default=None, help="Plot only demos in /data/mask/skill_<id> (e.g., 1 -> skill_1)")
+    ap.add_argument("--out-dir", type=str, default="/home/sungboo/rb10_control/images/", help="If set, save all figures into this directory.")
     args = ap.parse_args()
 
     with h5py.File(args.hdf5, "r") as f:
@@ -197,6 +215,13 @@ def main():
                 print(f"  {k}: image shape={arr.shape}")
             else:
                 print(f"  {k}: {first_value_str(arr)}")
+                try:
+                    arr_np = np.asarray(arr)
+                    plot_multichannel(f"demo_0_obs_{k}", arr_np, t,
+                                    max_dims=args.max_dims,
+                                    out_dir=args.out_dir)
+                except Exception as e:
+                    print(f"[skip plot] {k}: {e}")
 
         # ----- 3. 모든 demo의 ee_pos 궤적을 한 그림에 -----
         fig3d = plt.figure(figsize=(6, 6))
@@ -271,6 +296,11 @@ def main():
                 ax3d.legend(fontsize=8, loc="best", ncol=2)
             else:
                 print(f"[note] {len(selected_demo_keys)} demos selected; legend omitted (too crowded).")
+            if args.out_dir is not None:
+                os.makedirs(args.out_dir, exist_ok=True)
+                fname = os.path.join(args.out_dir, "ee_pos_trajectories.png")
+                fig3d.savefig(fname, dpi=200)
+                print(f"[saved] {fname}")
         else:
             print("[note] ee_pos 데이터를 가진 demo가 없습니다.")
 
