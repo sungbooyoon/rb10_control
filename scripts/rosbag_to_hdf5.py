@@ -656,7 +656,13 @@ def parse_args():
     p.add_argument("--sync-tol", type=float, default=0.05, help="Max time diff (sec) for nearest sync")
     p.add_argument("--image-resize", nargs=2, type=int, default=None, metavar=("H", "W"),
                    help="Resize RGB to (H W); omit to keep original")
-    p.add_argument("--no-rgb", action="store_true", help="Do not load RGB images even if topic exists (saves memory).")
+    # RGB loading (default: OFF to avoid OOM)
+    g_rgb = p.add_mutually_exclusive_group()
+    g_rgb.add_argument("--rgb", dest="use_rgb", action="store_true",
+                       help="Load RGB images into the HDF5 (can use lots of RAM).")
+    g_rgb.add_argument("--no-rgb", dest="use_rgb", action="store_false",
+                       help="Do not load RGB images even if topic exists (default).")
+    p.set_defaults(use_rgb=False)
 
     # action normalization (default: True)
     g_norm = p.add_mutually_exclusive_group()
@@ -680,7 +686,7 @@ def parse_args():
 def main():
     args = parse_args()
     topics = DEFAULT_TOPICS.copy()
-    if args.no_rgb:
+    if not args.use_rgb:
         topics["rgb"] = None
 
     uris = discover_bag_uris(args.folder)
@@ -692,11 +698,13 @@ def main():
     demos: List[Dict] = []
     for uri in uris:
         print(f"[INFO] Processing: {uri}")
+        if args.use_rgb and not args.image_resize:
+            print("[WARN] RGB loading is enabled without --image-resize. This may cause OOM and the process can be killed.", file=sys.stderr)
         res = process_single_bag(
             bag_uri=uri,
             topics=topics,
             sync_tol=args.sync_tol,
-            image_resize=(tuple(args.image_resize) if (args.image_resize and not args.no_rgb) else None),
+            image_resize=(tuple(args.image_resize) if (args.image_resize and args.use_rgb) else None),
             normalize_actions=args.normalize_actions,
             action_scale_json=args.action_scale_json,
         )
