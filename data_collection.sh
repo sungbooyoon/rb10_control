@@ -82,7 +82,8 @@ ros2 bag record -o demo_$(date +%Y%m%d_%H%M%S) -s mcap \
 # python3 /home/sungboo/rb10_control/scripts/read_dataset.py
 python3 /home/sungboo/rb10_control/scripts/rosbag_to_hdf5.py \
   --folder /home/sungboo/rb10_control/data/demo_20260122 \
-  --out /home/sungboo/rb10_control/data/demo_20260122.hdf5 --no-rgb
+  --out /home/sungboo/rb10_control/data/demo_20260122.hdf5
+  # --no-rgb
 python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
   --hdf5 /home/sungboo/rb10_control/data/demo_20260122.hdf5 \
   --out-dir /home/sungboo/rb10_control/images/demo_20260122/
