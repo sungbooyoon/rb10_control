@@ -1,30 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-Read a ROS 2 rosbag2 MCAP file and compute pose of target frame(s) in source frame.
+Extract TF pose (parent -> child) from a ROS2 bag (MCAP) into CSV.
+- Reads both /tf and /tf_static
+- Writes time, translation, quaternion (xyzw)
 
-- Reads /tf and optionally /tf_static
-- Maintains latest transforms in a graph
-- For each timestamp, if a path exists source->target, composes transforms to get pose
-- Saves results to CSV and NPZ
-
-Requirements:
-  pip install rosbags numpy
-
-Usage examples:
-  python extract_tf_link0_to_tag_from_mcap.py \
-    --bag /path/to/demo_20260119_174306 \
-    --source link0 \
-    --target tag36h11:0 \
-    --out_csv /tmp/link0_to_tag.csv \
-    --out_npz /tmp/link0_to_tag.npz
-
-  # If you want "any frame name containing tag36h11"
-  python extract_tf_link0_to_tag_from_mcap.py \
-    --bag /path/to/demo_20260119_174306 \
-    --source link0 \
-    --target_contains tag36h11
+Usage:
+  python3 extract_tag_tf.py \
+    --bag /path/to/demo_202601xx_xxxxxx \
+    --parent link0 \
+    --child tag36h11:1 \
+    --out tag_pose.csv
 """
 
 from __future__ import annotations
@@ -33,251 +19,224 @@ import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List, Iterable
+from typing import Dict, Tuple, Optional, List
 
 import numpy as np
 
-from rosbags.highlevel import AnyReader
+from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
+from rclpy.serialization import deserialize_message
+from rosidl_runtime_py.utilities import get_message
 
 
 # ----------------------------
-# Transform math (t + quat)
+# Transform math (t + quat xyzw)
 # ----------------------------
 
-@dataclass(frozen=True)
+@dataclass
 class Tform:
-    # translation (3,)
-    t: np.ndarray
-    # quaternion xyzw (4,)
-    q: np.ndarray
+    t: np.ndarray  # (3,)
+    q: np.ndarray  # (4,) xyzw
 
-def _q_normalize(q: np.ndarray) -> np.ndarray:
+
+def q_normalize(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
     n = np.linalg.norm(q)
     if n < 1e-12:
         return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
     return q / n
 
-def _q_conj(q: np.ndarray) -> np.ndarray:
+
+def q_conj(q: np.ndarray) -> np.ndarray:
     return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float64)
 
-def _q_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    # Hamilton product, quats are xyzw
-    x1, y1, z1, w1 = q1
-    x2, y2, z2, w2 = q2
-    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-    return _q_normalize(np.array([x, y, z, w], dtype=np.float64))
 
-def _q_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    # rotate vector v by quaternion q (xyzw)
-    q = _q_normalize(q)
-    v = np.asarray(v, dtype=np.float64)
+def q_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    # xyzw convention
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([
+        aw*bx + ax*bw + ay*bz - az*by,
+        aw*by - ax*bz + ay*bw + az*bx,
+        aw*bz + ax*by - ay*bx + az*bw,
+        aw*bw - ax*bx - ay*by - az*bz
+    ], dtype=np.float64)
+
+
+def q_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     # v' = q * (v,0) * q_conj
-    qv = np.array([v[0], v[1], v[2], 0.0], dtype=np.float64)
-    return _q_mul(_q_mul(q, qv), _q_conj(q))[:3]
+    vq = np.array([v[0], v[1], v[2], 0.0], dtype=np.float64)
+    return q_mul(q_mul(q, vq), q_conj(q))[:3]
 
-def tform_inv(T: Tform) -> Tform:
-    qinv = _q_conj(_q_normalize(T.q))
-    tinv = -_q_rotate(qinv, T.t)
-    return Tform(t=tinv, q=qinv)
 
-def tform_mul(A: Tform, B: Tform) -> Tform:
-    # A ∘ B  (apply B then A)
-    t = A.t + _q_rotate(A.q, B.t)
-    q = _q_mul(A.q, B.q)
-    return Tform(t=t, q=q)
+def tf_inv(T: Tform) -> Tform:
+    qi = q_conj(T.q)
+    ti = -q_rotate(qi, T.t)
+    return Tform(t=ti, q=qi)
 
-IDENTITY = Tform(t=np.zeros(3, dtype=np.float64), q=np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64))
+
+def tf_mul(A: Tform, B: Tform) -> Tform:
+    # A∘B
+    t = A.t + q_rotate(A.q, B.t)
+    q = q_mul(A.q, B.q)
+    return Tform(t=t, q=q_normalize(q))
 
 
 # ----------------------------
-# TF graph buffer
+# TF graph lookup (chain parent->child)
+# store edges as: parent -> child transform
 # ----------------------------
 
-class TfBufferGraph:
+def find_chain_transform(
+    edges: Dict[Tuple[str, str], Tform],
+    parent: str,
+    child: str,
+    max_depth: int = 50
+) -> Optional[Tform]:
     """
-    Stores latest transforms as directed edges parent->child.
-    Allows querying composed transform source->target by finding a path
-    in an undirected view of the graph (using inverse edges when traversing backward).
+    Find transform parent->child by BFS over directed edges and their inverses.
+    edges contains parent->child.
+    We allow traversing both directions by using inverse when needed.
     """
-    def __init__(self):
-        self._edges: Dict[Tuple[str, str], Tform] = {}  # (parent, child) -> T(parent->child)
+    if parent == child:
+        return Tform(t=np.zeros(3), q=np.array([0.0, 0.0, 0.0, 1.0]))
 
-    def update(self, parent: str, child: str, T_parent_child: Tform):
-        self._edges[(parent, child)] = T_parent_child
+    # adjacency: node -> list of (next_node, transform node->next_node)
+    adj: Dict[str, List[Tuple[str, Tform]]] = {}
+    for (p, c), T in edges.items():
+        adj.setdefault(p, []).append((c, T))
+        adj.setdefault(c, []).append((p, tf_inv(T)))  # reverse direction
 
-    def _neighbors(self, frame: str) -> Iterable[Tuple[str, Tform]]:
-        # Return neighbors with transform from 'frame' to neighbor.
-        # If we have (frame -> nb), use it.
-        # If we have (nb -> frame), use inverse.
-        for (p, c), T in self._edges.items():
-            if p == frame:
-                yield c, T
-            elif c == frame:
-                yield p, tform_inv(T)
+    # BFS
+    from collections import deque
+    q = deque()
+    q.append(parent)
+    visited = {parent}
+    prev: Dict[str, Tuple[str, Tform]] = {}  # node -> (prev_node, prev->node)
 
-    def lookup(self, source: str, target: str, max_hops: int = 64) -> Optional[Tform]:
-        if source == target:
-            return IDENTITY
-
-        # BFS for path + transforms along path
-        from collections import deque
-
-        visited = set([source])
-        q = deque()
-        q.append((source, IDENTITY))  # current frame, T(source->current)
-
-        hops = 0
-        while q and hops < 200000:
-            cur, T_source_cur = q.popleft()
-            if cur == target:
-                return T_source_cur
-
-            for nb, T_cur_nb in self._neighbors(cur):
-                if nb in visited:
+    depth = 0
+    while q and depth < max_depth:
+        for _ in range(len(q)):
+            cur = q.popleft()
+            if cur == child:
+                # reconstruct
+                T_acc = Tform(t=np.zeros(3), q=np.array([0.0, 0.0, 0.0, 1.0]))
+                node = child
+                while node != parent:
+                    pnode, T_p_to_node = prev[node]
+                    T_acc = tf_mul(T_p_to_node, T_acc)
+                    node = pnode
+                return T_acc
+            for nxt, T_cur_to_nxt in adj.get(cur, []):
+                if nxt in visited:
                     continue
-                visited.add(nb)
+                visited.add(nxt)
+                prev[nxt] = (cur, T_cur_to_nxt)
+                q.append(nxt)
+        depth += 1
 
-                # T(source->nb) = T(source->cur) ∘ T(cur->nb)
-                T_source_nb = tform_mul(T_source_cur, T_cur_nb)
-                q.append((nb, T_source_nb))
+    return None
 
-            hops += 1
-            if len(visited) > max_hops * 500:  # safety guard
-                break
-
-        return None
-
-    def known_frames(self) -> List[str]:
-        frames = set()
-        for (p, c) in self._edges.keys():
-            frames.add(p)
-            frames.add(c)
-        return sorted(frames)
-
-
-# ----------------------------
-# Main bag reading
-# ----------------------------
-
-def parse_args():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--bag", required=True, help="Path to rosbag2 directory (containing metadata.yaml) or .mcap")
-    ap.add_argument("--source", required=True, help="Source frame (e.g., link0)")
-    grp = ap.add_mutually_exclusive_group(required=True)
-    grp.add_argument("--target", help="Exact target frame name (e.g., tag36h11:0)")
-    grp.add_argument("--target_contains", help="Substring match for target frames (e.g., tag36h11)")
-    ap.add_argument("--tf_topic", default="/tf", help="TF topic (default: /tf)")
-    ap.add_argument("--tf_static_topic", default="/tf_static", help="TF static topic (default: /tf_static)")
-    ap.add_argument("--include_tf_static", action="store_true", help="Also ingest /tf_static")
-    ap.add_argument("--out_csv", required=True, help="Output CSV path")
-    ap.add_argument("--out_npz", required=True, help="Output NPZ path")
-    ap.add_argument("--sample_every", type=int, default=1,
-                    help="Record every N-th TFMessage (default: 1). Increase to downsample.")
-    return ap.parse_args()
-
-def _tform_from_ros_transform(transform_msg) -> Tform:
-    t = np.array([transform_msg.translation.x,
-                  transform_msg.translation.y,
-                  transform_msg.translation.z], dtype=np.float64)
-    q = np.array([transform_msg.rotation.x,
-                  transform_msg.rotation.y,
-                  transform_msg.rotation.z,
-                  transform_msg.rotation.w], dtype=np.float64)
-    return Tform(t=t, q=_q_normalize(q))
 
 def main():
-    args = parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--bag", required=True, type=str, help="ROS2 bag directory (MCAP)")
+    ap.add_argument("--parent", required=True, type=str)
+    ap.add_argument("--child", required=True, type=str)
+    ap.add_argument("--out", required=True, type=str)
+    ap.add_argument("--sample_hz", type=float, default=0.0,
+                    help="0이면 TF 메시지 도착 시점마다 저장. >0이면 해당 Hz로 리샘플링(간단).")
+    args = ap.parse_args()
+
     bag_path = Path(args.bag)
-    out_csv = Path(args.out_csv)
-    out_npz = Path(args.out_npz)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    out_npz.parent.mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.out)
 
-    buf = TfBufferGraph()
+    reader = SequentialReader()
+    storage_options = StorageOptions(uri=str(bag_path), storage_id="mcap")
+    converter_options = ConverterOptions(input_serialization_format="cdr",
+                                         output_serialization_format="cdr")
+    reader.open(storage_options, converter_options)
 
-    rows = []  # (t_ns, target_frame, x,y,z,qx,qy,qz,qw)
+    topics = reader.get_all_topics_and_types()
+    type_map = {t.name: t.type for t in topics}
 
-    # AnyReader can open rosbag2 directory or single file storage (including mcap) depending on install.
-    with AnyReader([bag_path]) as reader:
-        # figure out available connections
-        connections = list(reader.connections)
-        tf_conns = [c for c in connections if c.topic == args.tf_topic]
-        if args.include_tf_static:
-            tf_conns += [c for c in connections if c.topic == args.tf_static_topic]
+    if "/tf" not in type_map and "/tf_static" not in type_map:
+        raise RuntimeError("Bag에 /tf 또는 /tf_static이 없습니다. apriltag TF를 기록했는지 확인하세요.")
 
-        if not tf_conns:
-            available = sorted(set(c.topic for c in connections))
-            raise RuntimeError(
-                f"No TF connections found. Requested {args.tf_topic}"
-                + (f" and {args.tf_static_topic}" if args.include_tf_static else "")
-                + f"\nAvailable topics include:\n  " + "\n  ".join(available[:200])
+    TFMessage = get_message("tf2_msgs/msg/TFMessage")
+
+    # current TF edges (static+dynamic merged; dynamic overwrites)
+    edges: Dict[Tuple[str, str], Tform] = {}
+
+    # for simple resampling
+    next_sample_ns: Optional[int] = None
+    if args.sample_hz and args.sample_hz > 0:
+        period_ns = int(1e9 / args.sample_hz)
+    else:
+        period_ns = None
+
+    rows = []
+    while reader.has_next():
+        topic, data, t_ns = reader.read_next()
+
+        if topic not in ("/tf", "/tf_static"):
+            continue
+
+        msg = deserialize_message(data, TFMessage)
+
+        # update edges
+        for tr in msg.transforms:
+            p = tr.header.frame_id.strip()
+            c = tr.child_frame_id.strip()
+            # ROS TF frame_id sometimes starts with '/'
+            if p.startswith("/"):
+                p = p[1:]
+            if c.startswith("/"):
+                c = c[1:]
+            T = Tform(
+                t=np.array([tr.transform.translation.x,
+                            tr.transform.translation.y,
+                            tr.transform.translation.z], dtype=np.float64),
+                q=q_normalize(np.array([tr.transform.rotation.x,
+                                        tr.transform.rotation.y,
+                                        tr.transform.rotation.z,
+                                        tr.transform.rotation.w], dtype=np.float64))
             )
+            edges[(p, c)] = T
 
-        # map typestore
-        typestore = reader.typestore
+        # decide whether to sample now
+        do_sample = False
+        if period_ns is None:
+            do_sample = True
+        else:
+            if next_sample_ns is None:
+                next_sample_ns = t_ns
+                do_sample = True
+            elif t_ns >= next_sample_ns:
+                do_sample = True
+                next_sample_ns += period_ns
 
-        msg_idx = 0
-        for conn, t_ns, raw in reader.messages(connections=tf_conns):
-            msg = typestore.deserialize_cdr(raw, conn.msgtype)
+        if not do_sample:
+            continue
 
-            # tf2_msgs/msg/TFMessage: transforms[]
-            # Each element has header.stamp, header.frame_id, child_frame_id, transform
-            if not hasattr(msg, "transforms"):
-                continue
+        T_pc = find_chain_transform(edges, args.parent, args.child)
+        if T_pc is None:
+            continue  # chain not available yet at this time
 
-            # Update graph with all transforms in this message
-            for tr in msg.transforms:
-                parent = tr.header.frame_id.strip()
-                child = tr.child_frame_id.strip()
-                T = _tform_from_ros_transform(tr.transform)
-                if parent and child:
-                    buf.update(parent, child, T)
+        stamp_sec = t_ns / 1e9
+        rows.append([
+            stamp_sec,
+            float(T_pc.t[0]), float(T_pc.t[1]), float(T_pc.t[2]),
+            float(T_pc.q[0]), float(T_pc.q[1]), float(T_pc.q[2]), float(T_pc.q[3]),
+        ])
 
-            if (msg_idx % max(args.sample_every, 1)) != 0:
-                msg_idx += 1
-                continue
-            msg_idx += 1
-
-            # Determine which target frames to compute
-            if args.target:
-                targets = [args.target]
-            else:
-                # substring match among known frames
-                targets = [f for f in buf.known_frames() if args.target_contains in f]
-
-            for tgt in targets:
-                T_src_tgt = buf.lookup(args.source, tgt)
-                if T_src_tgt is None:
-                    continue
-                x, y, z = T_src_tgt.t.tolist()
-                qx, qy, qz, qw = T_src_tgt.q.tolist()
-                rows.append((int(t_ns), tgt, x, y, z, qx, qy, qz, qw))
-
-    # Save CSV
-    with out_csv.open("w", newline="") as f:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["t_ns", "target_frame", "x", "y", "z", "qx", "qy", "qz", "qw"])
+        w.writerow(["t_sec", "x", "y", "z", "qx", "qy", "qz", "qw"])
         w.writerows(rows)
 
-    # Save NPZ
-    if rows:
-        t_ns = np.array([r[0] for r in rows], dtype=np.int64)
-        target = np.array([r[1] for r in rows], dtype=object)
-        pose = np.array([[r[2], r[3], r[4], r[5], r[6], r[7], r[8]] for r in rows], dtype=np.float64)
-    else:
-        t_ns = np.zeros((0,), dtype=np.int64)
-        target = np.zeros((0,), dtype=object)
-        pose = np.zeros((0, 7), dtype=np.float64)
+    print(f"[OK] wrote {len(rows)} rows -> {out_path}")
 
-    np.savez(out_npz, t_ns=t_ns, target_frame=target, pose_xyzw=pose)
-
-    print(f"Done. Wrote {len(rows)} poses.")
-    print(f"CSV: {out_csv}")
-    print(f"NPZ: {out_npz}")
 
 if __name__ == "__main__":
     main()
