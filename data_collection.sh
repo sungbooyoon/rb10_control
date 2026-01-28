@@ -85,7 +85,7 @@ python3 /home/sungboo/rb10_control/scripts/rosbag_to_hdf5.py \
   --out /home/sungboo/rb10_control/data/demo_20260122.hdf5
   # --no-rgb
 python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
-  --hdf5 /home/sungboo/rb10_control/data/demo_20260122.hdf5 \
+  --hdf5 /home/sungboo/rb10_control/data/demo_20260122_480+640.hdf5 \
   --out-dir /home/sungboo/rb10_control/images/demo_20260122/
 
 
