@@ -66,7 +66,7 @@ if __name__ == "__main__":
             for fk in f["mask"]:
                 fk_demos = sorted([elem.decode("utf-8") for elem in np.array(f["mask/{}".format(fk)])])
                 all_filter_keys[fk] = fk_demos
-
+    print(demos)
     # put demonstration list in increasing episode order
     inds = np.argsort([int(elem[5:]) for elem in demos])
     demos = [demos[i] for i in inds]

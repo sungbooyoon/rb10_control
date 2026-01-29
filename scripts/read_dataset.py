@@ -170,6 +170,52 @@ def main():
         except Exception:
             print("Env Args (raw):", raw_env)
 
+        # ---- skill mask 리스트업 ----
+        skill_ids = []
+        skill_keys = []
+        if "mask" not in data:
+            print("  <no /data/mask group>")
+        else:
+            mask = data["mask"]
+
+            skill_keys = sorted(
+                [k for k in mask.keys() if k.startswith("skill_")],
+                key=lambda s: int(s.split("_", 1)[1]) if s.split("_", 1)[1].isdigit() else 10**9
+            )
+
+            if not skill_keys:
+                print("  <no skill_* masks>")
+            else:
+                for sk in skill_keys:
+                    try:
+                        raw = mask[sk][...]
+                        demo_list = []
+                        for s in raw:
+                            if isinstance(s, (bytes, bytearray)):
+                                demo_list.append(s.decode("utf-8"))
+                            else:
+                                demo_list.append(str(s))
+
+                        print(f"  /{sk} -> {demo_list}")
+                    except Exception as e:
+                        print(f"  /{sk} -> <unreadable> ({e})")
+
+        # (옵션) 각 skill에 포함된 demo 개수도 같이 보고 싶으면:
+        if skill_keys:
+            for sk in skill_keys:
+                try:
+                    raw = data["mask"][sk][...]
+                    demos_in_skill = []
+                    for s in raw:
+                        if isinstance(s, (bytes, bytearray)):
+                            demos_in_skill.append(s.decode("utf-8"))
+                        else:
+                            demos_in_skill.append(str(s))
+                    demos_in_skill = [d for d in demos_in_skill if d in data]
+                    print(f"  - {sk}: {len(demos_in_skill)} demos")
+                except Exception as e:
+                    print(f"  - {sk}: <unreadable> ({e})")
+
         # ----- 2. demo_0의 obs와 action -----
         if "demo_0" not in data:
             raise KeyError("demo_0 그룹이 없습니다.")

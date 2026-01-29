@@ -84,10 +84,10 @@ python3 /home/sungboo/rb10_control/scripts/rosbag_to_hdf5.py \
   --out /home/sungboo/rb10_control/data/demo_20260122.hdf5
   <!-- --no-rgb -->
 python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
-  --hdf5 /home/sungboo/rb10_control/data/demo_20260122_480+640.hdf5 \
+  --hdf5 /home/sungboo/rb10_control/data/demo_20260122.hdf5 \
   --out-dir /home/sungboo/rb10_control/images/demo_20260122/
 
----
+## (Run Once) Tag 위치 추출
 python3 /home/sungboo/rb10_control/scripts/extract_tf_from_rosbag.py \
   --bag /home/sungboo/rb10_control/data/apriltag/apriltag_20260122_172601 \
   --parent link0 \
@@ -100,6 +100,9 @@ python3 /home/sungboo/rb10_control/scripts/cluster_apriltag.py \
   --min_samples 5 \
   --out /home/sungboo/rb10_control/data/apriltag/apriltag_20260122_172601/link0_to_tag_avg.csv
 
-- Tag 1: 0.7792126060750939,-0.1834261897929647,1.0923078301469469,0.49257851683287046,-0.5056444989972777,-0.5139801022992767,0.48735459352400357
+- Tag 1: 0.7792766396940909,-0.3408561185649196,1.087119146987467,0.5040227668956027,-0.49545032399749467,-0.5025265274518764,0.49795292559521853
 - Tag 2: 0.7795913130268544,0.46453726735503503,1.0852591067208173,0.5030583310773759,-0.5039807608747278,-0.49834431333499923,0.4945590496274876
+
+- 수정 Tag 1: 0.779, -0.340, 1.086, 0.5, -0.5, -0.5, 0.5
+- 수정 Tag 2: 0.779, 0.460, 1.086, 0.5, -0.5, -0.5, 0.5
 
