@@ -62,7 +62,7 @@ ros2 bag record -o res_$(date +%Y%m%d_%H%M%S) -s mcap \
 
 python3 /home/sungboo/rb10_control/scripts/export_rgbd_from_rosbag.py --bag "" --hz 10
 stitch --no-crop img_dir/IMG*.jpg 
-``
+
 ---
 # 4. Replay and Collect
 python3 /home/sungboo/rb10_control/scripts/rosbag_replay.py --bag /path/to/bag_folder
@@ -100,5 +100,5 @@ python3 /home/sungboo/rb10_control/scripts/cluster_apriltag.py \
   --min_samples 5 \
   --out /home/sungboo/rb10_control/data/apriltag/apriltag_20260122_172601/link0_to_tag_avg.csv
 
-Tag 1: 0.7792126060750939,-0.1834261897929647,1.0923078301469469,0.49257851683287046,-0.5056444989972777,-0.5139801022992767,0.48735459352400357
+Tag 1: 0.7792126060750939,-0.1834261897929647,1.0923078301469469,0.49257851683287046,-0.5056444989972777,-0.5139801022992767,0.48735459352400357 
 Tag 2: 0.7795913130268544,0.46453726735503503,1.0852591067208173,0.5030583310773759,-0.5039807608747278,-0.49834431333499923,0.4945590496274876
