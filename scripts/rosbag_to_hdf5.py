@@ -733,7 +733,7 @@ def write_many_demos(
 
         # robomimic-style masks
         if len(skill_to_demos) > 0:
-            g_mask = g_data.create_group("mask")
+            g_mask = f.create_group("mask")
             for key in sorted(skill_to_demos.keys()):
                 demo_names = np.array(skill_to_demos[key], dtype=h5py.string_dtype(encoding="utf-8"))
                 g_mask.create_dataset(key, data=demo_names)

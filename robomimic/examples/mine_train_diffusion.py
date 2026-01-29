@@ -60,7 +60,7 @@ def robosuite_hyperparameters(config):
     # config.experiment.video_skip = 5                            # render video frame every n environment steps during rollout
 
     ## evaluation rollout config ##
-    # config.experiment.rollout.enabled = True                    # enable evaluation rollouts
+    config.experiment.rollout.enabled = False                    # enable evaluation rollouts
     # config.experiment.rollout.n = 50                            # number of rollouts per evaluation
     # config.experiment.rollout.horizon = 400                     # set horizon based on length of demonstrations (can be obtained with scripts/get_dataset_info.py)
     # config.experiment.rollout.rate = 50                         # do rollouts every @rate epochs
@@ -218,13 +218,13 @@ def momart_hyperparameters(config):
     config.experiment.additional_envs = None                    # additional environments that should get evaluated
 
     ## rendering config ##
-    config.experiment.render = False                            # render on-screen or not
-    config.experiment.render_video = True                       # render evaluation rollouts to videos
-    config.experiment.keep_all_videos = False                   # save all videos, instead of only saving those for saved model checkpoints
-    config.experiment.video_skip = 5                            # render video frame every n environment steps during rollout
+    # config.experiment.render = False                            # render on-screen or not
+    # config.experiment.render_video = True                       # render evaluation rollouts to videos
+    # config.experiment.keep_all_videos = False                   # save all videos, instead of only saving those for saved model checkpoints
+    # config.experiment.video_skip = 5                            # render video frame every n environment steps during rollout
 
     ## evaluation rollout config ##
-    config.experiment.rollout.enabled = True                    # enable evaluation rollouts
+    config.experiment.rollout.enabled = False                    # enable evaluation rollouts
     config.experiment.rollout.n = 30                            # number of rollouts per evaluation
     config.experiment.rollout.horizon = 1500                    # maximum number of env steps per rollout
     config.experiment.rollout.rate = 3                          # do rollouts every @rate epochs
