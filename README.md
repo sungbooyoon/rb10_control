@@ -98,6 +98,10 @@ python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
   --hdf5 /home/sungboo/rb10_control/data/demo_20260122.hdf5 \
   --out-dir /home/sungboo/rb10_control/images/demo_20260122/
 
+python3 /home/sungboo/rb10_control/robomimic/robomimic/scripts/get_dataset_info.py \
+  --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 \
+  --verbose
+
 ## (Run Once) Tag 위치 추출
 python3 /home/sungboo/rb10_control/scripts/extract_tf_from_rosbag.py \
   --bag /home/sungboo/rb10_control/data/apriltag/apriltag_20260122_172601 \
