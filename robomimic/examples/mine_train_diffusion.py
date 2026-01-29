@@ -275,20 +275,21 @@ def momart_hyperparameters(config):
 
     ### Observation Config ###
     config.observation.modalities.obs.low_dim = [               # specify low-dim observations for agent
-        "proprio",
+        "ee_pos",
+        "ee_quat",
+        "joint_pos",
     ]
     config.observation.modalities.obs.rgb = [
         "rgb",
-        "rgb_wrist",
     ]
 
-    config.observation.modalities.obs.depth = [
-        "depth",
-        "depth_wrist",
-    ]
-    config.observation.modalities.obs.scan = [
-        "scan",
-    ]
+    # config.observation.modalities.obs.depth = [
+    #     "depth",
+    #     "depth_wrist",
+    # ]
+    # config.observation.modalities.obs.scan = [
+    #     "scan",
+    # ]
     config.observation.modalities.goal.low_dim = []             # no low-dim goals
     config.observation.modalities.goal.rgb = []               # no rgb image goals
 
@@ -302,31 +303,31 @@ def momart_hyperparameters(config):
     config.algo.optim_params.policy.learning_rate.initial = 1e-4        # policy learning rate
     config.algo.optim_params.policy.learning_rate.decay_factor = 0.1    # factor to decay LR by (if epoch schedule non-empty)
     config.algo.optim_params.policy.learning_rate.epoch_schedule = []   # epochs where LR decay occurs
-    config.algo.optim_params.policy.regularization.L2 = 0.00            # L2 regularization strength
+    config.algo.optim_params.policy.regularization.L2 = 1e-06            # L2 regularization strength
 
     # loss weights
-    config.algo.loss.l2_weight = 1.0    # L2 loss weight
-    config.algo.loss.l1_weight = 0.0    # L1 loss weight
-    config.algo.loss.cos_weight = 0.0   # cosine loss weight
+    # config.algo.loss.l2_weight = 1.0    # L2 loss weight
+    # config.algo.loss.l1_weight = 0.0    # L1 loss weight
+    # config.algo.loss.cos_weight = 0.0   # cosine loss weight
 
     # MLP network architecture (layers after observation encoder and RNN, if present)
-    config.algo.actor_layer_dims = (300, 400)           # MLP layers between RNN layer and action output
+    # config.algo.actor_layer_dims = (300, 400)           # MLP layers between RNN layer and action output
 
     # stochastic GMM policy
-    config.algo.gmm.enabled = True                      # enable GMM policy - policy outputs GMM action distribution
-    config.algo.gmm.num_modes = 5                       # number of GMM modes
-    config.algo.gmm.min_std = 0.01                      # minimum std output from network
-    config.algo.gmm.std_activation = "softplus"         # activation to use for std output from policy net
-    config.algo.gmm.low_noise_eval = True               # low-std at test-time
+    # config.algo.gmm.enabled = True                      # enable GMM policy - policy outputs GMM action distribution
+    # config.algo.gmm.num_modes = 5                       # number of GMM modes
+    # config.algo.gmm.min_std = 0.01                      # minimum std output from network
+    # config.algo.gmm.std_activation = "softplus"         # activation to use for std output from policy net
+    # config.algo.gmm.low_noise_eval = True               # low-std at test-time
 
     # rnn policy config
-    config.algo.rnn.enabled = True      # enable RNN policy
-    config.algo.rnn.horizon = 50        # unroll length for RNN - should usually match train.seq_length
-    config.algo.rnn.hidden_dim = 1200   # hidden dimension size
-    config.algo.rnn.rnn_type = "LSTM"   # rnn type - one of "LSTM" or "GRU"
-    config.algo.rnn.num_layers = 2      # number of RNN layers that are stacked
-    config.algo.rnn.open_loop = False   # if True, action predictions are only based on a single observation (not sequence) + hidden state
-    config.algo.rnn.kwargs.bidirectional = False          # rnn kwargs
+    # config.algo.rnn.enabled = True      # enable RNN policy
+    # config.algo.rnn.horizon = 50        # unroll length for RNN - should usually match train.seq_length
+    # config.algo.rnn.hidden_dim = 1200   # hidden dimension size
+    # config.algo.rnn.rnn_type = "LSTM"   # rnn type - one of "LSTM" or "GRU"
+    # config.algo.rnn.num_layers = 2      # number of RNN layers that are stacked
+    # config.algo.rnn.open_loop = False   # if True, action predictions are only based on a single observation (not sequence) + hidden state
+    # config.algo.rnn.kwargs.bidirectional = False          # rnn kwargs
 
     ## noise scheduler: ddpm or ddim
     config.algo.ddpm.enabled = True
