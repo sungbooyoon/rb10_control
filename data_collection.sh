@@ -88,10 +88,8 @@ python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
   --hdf5 /home/sungboo/rb10_control/data/demo_20260122_480+640.hdf5 \
   --out-dir /home/sungboo/rb10_control/images/demo_20260122/
 
-
-python /home/sungboo/rb10_control/scripts/extract_tf_from_rosbag.py \
+python3 /home/sungboo/rb10_control/scripts/extract_tf_from_rosbag.py \
   --bag /home/sungboo/rb10_control/data/apriltag/apriltag_20260122_172601 \
-  --source camera_color_optical_frame \
-  --target_contains tag36h11 \
-  --out_csv /home/sungboo/rb10_control/data/apriltag/apriltag_20260122_172601/link0_to_tag.csv \
-  --out_npz /home/sungboo/rb10_control/data/apriltag/apriltag_20260122_172601/link0_to_tag.npz
+  --parent link0 \
+  --tag_prefix tag36h11: \
+  --out /home/sungboo/rb10_control/data/apriltag/apriltag_20260122_172601/link0_to_tag.csv

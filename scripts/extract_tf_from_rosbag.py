@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Extract TF pose (parent -> child) from a ROS2 bag (MCAP) into CSV.
-- Reads both /tf and /tf_static
-- Writes time, translation, quaternion (xyzw)
+Extract TF poses for ALL AprilTag frames (e.g. tag36h11:*)
+from a ROS2 MCAP bag into CSV.
+
+- Reads /tf and /tf_static
+- Computes parent -> tag transform
+- Writes tag_frame name into CSV
 
 Usage:
-  python3 extract_tag_tf.py \
-    --bag /path/to/demo_202601xx_xxxxxx \
-    --parent link0 \
-    --child tag36h11:1 \
-    --out tag_pose.csv
+python3 extract_all_tags_tf.py \
+  --bag /path/to/demo_xxx \
+  --parent link0 \
+  --tag_prefix tag36h11: \
+  --out tags_pose.csv
 """
 
 from __future__ import annotations
@@ -28,9 +32,9 @@ from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 
 
-# ----------------------------
-# Transform math (t + quat xyzw)
-# ----------------------------
+# =========================
+# Transform math
+# =========================
 
 @dataclass
 class Tform:
@@ -38,20 +42,19 @@ class Tform:
     q: np.ndarray  # (4,) xyzw
 
 
-def q_normalize(q: np.ndarray) -> np.ndarray:
+def q_normalize(q):
     q = np.asarray(q, dtype=np.float64)
     n = np.linalg.norm(q)
     if n < 1e-12:
-        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+        return np.array([0, 0, 0, 1], dtype=np.float64)
     return q / n
 
 
-def q_conj(q: np.ndarray) -> np.ndarray:
+def q_conj(q):
     return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float64)
 
 
-def q_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    # xyzw convention
+def q_mul(a, b):
     ax, ay, az, aw = a
     bx, by, bz, bw = b
     return np.array([
@@ -62,180 +65,143 @@ def q_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     ], dtype=np.float64)
 
 
-def q_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    # v' = q * (v,0) * q_conj
-    vq = np.array([v[0], v[1], v[2], 0.0], dtype=np.float64)
-    return q_mul(q_mul(q, vq), q_conj(q))[:3]
+def q_rotate(q, v):
+    return q_mul(q_mul(q, np.array([*v, 0.0])), q_conj(q))[:3]
 
 
-def tf_inv(T: Tform) -> Tform:
+def tf_inv(T):
     qi = q_conj(T.q)
     ti = -q_rotate(qi, T.t)
     return Tform(t=ti, q=qi)
 
 
-def tf_mul(A: Tform, B: Tform) -> Tform:
-    # A∘B
+def tf_mul(A, B):
     t = A.t + q_rotate(A.q, B.t)
-    q = q_mul(A.q, B.q)
-    return Tform(t=t, q=q_normalize(q))
+    q = q_normalize(q_mul(A.q, B.q))
+    return Tform(t=t, q=q)
 
 
-# ----------------------------
-# TF graph lookup (chain parent->child)
-# store edges as: parent -> child transform
-# ----------------------------
+# =========================
+# TF graph search
+# =========================
 
-def find_chain_transform(
-    edges: Dict[Tuple[str, str], Tform],
-    parent: str,
-    child: str,
-    max_depth: int = 50
-) -> Optional[Tform]:
-    """
-    Find transform parent->child by BFS over directed edges and their inverses.
-    edges contains parent->child.
-    We allow traversing both directions by using inverse when needed.
-    """
+def find_chain(edges, parent, child, max_depth=50):
     if parent == child:
-        return Tform(t=np.zeros(3), q=np.array([0.0, 0.0, 0.0, 1.0]))
+        return Tform(np.zeros(3), np.array([0, 0, 0, 1]))
 
-    # adjacency: node -> list of (next_node, transform node->next_node)
-    adj: Dict[str, List[Tuple[str, Tform]]] = {}
+    adj = {}
     for (p, c), T in edges.items():
         adj.setdefault(p, []).append((c, T))
-        adj.setdefault(c, []).append((p, tf_inv(T)))  # reverse direction
+        adj.setdefault(c, []).append((p, tf_inv(T)))
 
-    # BFS
     from collections import deque
-    q = deque()
-    q.append(parent)
+    q = deque([parent])
     visited = {parent}
-    prev: Dict[str, Tuple[str, Tform]] = {}  # node -> (prev_node, prev->node)
+    prev = {}
 
-    depth = 0
-    while q and depth < max_depth:
-        for _ in range(len(q)):
-            cur = q.popleft()
-            if cur == child:
-                # reconstruct
-                T_acc = Tform(t=np.zeros(3), q=np.array([0.0, 0.0, 0.0, 1.0]))
-                node = child
-                while node != parent:
-                    pnode, T_p_to_node = prev[node]
-                    T_acc = tf_mul(T_p_to_node, T_acc)
-                    node = pnode
-                return T_acc
-            for nxt, T_cur_to_nxt in adj.get(cur, []):
-                if nxt in visited:
-                    continue
-                visited.add(nxt)
-                prev[nxt] = (cur, T_cur_to_nxt)
-                q.append(nxt)
-        depth += 1
+    while q:
+        cur = q.popleft()
+        if cur == child:
+            Tacc = Tform(np.zeros(3), np.array([0, 0, 0, 1]))
+            n = child
+            while n != parent:
+                p, Tpn = prev[n]
+                Tacc = tf_mul(Tpn, Tacc)
+                n = p
+            return Tacc
+
+        for nxt, Tcur in adj.get(cur, []):
+            if nxt in visited:
+                continue
+            visited.add(nxt)
+            prev[nxt] = (cur, Tcur)
+            q.append(nxt)
 
     return None
 
 
+# =========================
+# Main
+# =========================
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bag", required=True, type=str, help="ROS2 bag directory (MCAP)")
-    ap.add_argument("--parent", required=True, type=str)
-    ap.add_argument("--child", required=True, type=str)
-    ap.add_argument("--out", required=True, type=str)
-    ap.add_argument("--sample_hz", type=float, default=0.0,
-                    help="0이면 TF 메시지 도착 시점마다 저장. >0이면 해당 Hz로 리샘플링(간단).")
+    ap.add_argument("--bag", required=True)
+    ap.add_argument("--parent", required=True)
+    ap.add_argument("--tag_prefix", default="tag36h11:")
+    ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    bag_path = Path(args.bag)
-    out_path = Path(args.out)
-
     reader = SequentialReader()
-    storage_options = StorageOptions(uri=str(bag_path), storage_id="mcap")
-    converter_options = ConverterOptions(input_serialization_format="cdr",
-                                         output_serialization_format="cdr")
-    reader.open(storage_options, converter_options)
-
-    topics = reader.get_all_topics_and_types()
-    type_map = {t.name: t.type for t in topics}
-
-    if "/tf" not in type_map and "/tf_static" not in type_map:
-        raise RuntimeError("Bag에 /tf 또는 /tf_static이 없습니다. apriltag TF를 기록했는지 확인하세요.")
+    reader.open(
+        StorageOptions(uri=args.bag, storage_id="mcap"),
+        ConverterOptions("cdr", "cdr")
+    )
 
     TFMessage = get_message("tf2_msgs/msg/TFMessage")
 
-    # current TF edges (static+dynamic merged; dynamic overwrites)
     edges: Dict[Tuple[str, str], Tform] = {}
 
-    # for simple resampling
-    next_sample_ns: Optional[int] = None
-    if args.sample_hz and args.sample_hz > 0:
-        period_ns = int(1e9 / args.sample_hz)
-    else:
-        period_ns = None
-
     rows = []
+
     while reader.has_next():
         topic, data, t_ns = reader.read_next()
-
         if topic not in ("/tf", "/tf_static"):
             continue
 
         msg = deserialize_message(data, TFMessage)
 
-        # update edges
+        # update TF edges
         for tr in msg.transforms:
-            p = tr.header.frame_id.strip()
-            c = tr.child_frame_id.strip()
-            # ROS TF frame_id sometimes starts with '/'
-            if p.startswith("/"):
-                p = p[1:]
-            if c.startswith("/"):
-                c = c[1:]
+            p = tr.header.frame_id.lstrip("/")
+            c = tr.child_frame_id.lstrip("/")
+
             T = Tform(
-                t=np.array([tr.transform.translation.x,
-                            tr.transform.translation.y,
-                            tr.transform.translation.z], dtype=np.float64),
-                q=q_normalize(np.array([tr.transform.rotation.x,
-                                        tr.transform.rotation.y,
-                                        tr.transform.rotation.z,
-                                        tr.transform.rotation.w], dtype=np.float64))
+                t=np.array([
+                    tr.transform.translation.x,
+                    tr.transform.translation.y,
+                    tr.transform.translation.z
+                ]),
+                q=q_normalize(np.array([
+                    tr.transform.rotation.x,
+                    tr.transform.rotation.y,
+                    tr.transform.rotation.z,
+                    tr.transform.rotation.w
+                ]))
             )
             edges[(p, c)] = T
 
-        # decide whether to sample now
-        do_sample = False
-        if period_ns is None:
-            do_sample = True
-        else:
-            if next_sample_ns is None:
-                next_sample_ns = t_ns
-                do_sample = True
-            elif t_ns >= next_sample_ns:
-                do_sample = True
-                next_sample_ns += period_ns
+        # collect all tag frames currently known
+        tag_frames = sorted({
+            c for (_, c) in edges.keys()
+            if c.startswith(args.tag_prefix)
+        })
 
-        if not do_sample:
-            continue
+        for tag in tag_frames:
+            Tpt = find_chain(edges, args.parent, tag)
+            if Tpt is None:
+                continue
 
-        T_pc = find_chain_transform(edges, args.parent, args.child)
-        if T_pc is None:
-            continue  # chain not available yet at this time
+            rows.append([
+                t_ns / 1e9,
+                tag,
+                Tpt.t[0], Tpt.t[1], Tpt.t[2],
+                Tpt.q[0], Tpt.q[1], Tpt.q[2], Tpt.q[3]
+            ])
 
-        stamp_sec = t_ns / 1e9
-        rows.append([
-            stamp_sec,
-            float(T_pc.t[0]), float(T_pc.t[1]), float(T_pc.t[2]),
-            float(T_pc.q[0]), float(T_pc.q[1]), float(T_pc.q[2]), float(T_pc.q[3]),
-        ])
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", newline="") as f:
+    with out.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["t_sec", "x", "y", "z", "qx", "qy", "qz", "qw"])
+        w.writerow([
+            "t_sec", "tag_frame",
+            "x", "y", "z",
+            "qx", "qy", "qz", "qw"
+        ])
         w.writerows(rows)
 
-    print(f"[OK] wrote {len(rows)} rows -> {out_path}")
+    print(f"[OK] {len(rows)} rows written → {out}")
 
 
 if __name__ == "__main__":
