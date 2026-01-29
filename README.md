@@ -95,7 +95,7 @@ python3 /home/sungboo/rb10_control/scripts/add_actions_to_dataset.py \
   --overwrite
 
 python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
-  --hdf5 /home/sungboo/rb10_control/data/demo_20260122.hdf5 \
+  --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 \
   --out-dir /home/sungboo/rb10_control/images/demo_20260122/
 
 python3 /home/sungboo/rb10_control/robomimic/robomimic/scripts/get_dataset_info.py \
@@ -121,3 +121,6 @@ python3 /home/sungboo/rb10_control/scripts/cluster_apriltag.py \
 - 수정 Tag 1: 0.779, -0.340, 1.086, 0.5, -0.5, -0.5, 0.5
 - 수정 Tag 2: 0.779, 0.460, 1.086, 0.5, -0.5, -0.5, 0.5
 
+# Robomimc training (Diffusion)
+python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py \
+  --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
