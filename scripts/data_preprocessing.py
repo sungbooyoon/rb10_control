@@ -4,14 +4,22 @@
 """
 Per-demo contact-origin local frame transform + verification plots (NO z-flip)
 + crop & save around contact segment
-+ NEW: also save skill_id_crop, t_crop aligned with X_crop
++ NEW:
+  - event-based phase alignment (chosen_idx -> phase 0, contact_end -> phase 1)
+  - quaternion sign-unwrapping (within demo)
+  - SO(3) log-map to R^3 (rotvec) relative to reference at chosen_idx
+  - save phase-aligned fixed-length sequences for MP training:
+      X_phase_crop : local position (phase_len, 3) per demo concatenated
+      W_phase_crop : local rotvec   (phase_len, 3) per demo concatenated
+      demo_ptr_phase, demo_names_phase
+      phase_grid
 
-Hard constraints (no CLI options):
-  - require_contact = ON  : stable search happens only after d(t) <= contact_d_thresh
-  - require_stable  = ON  : if stable not found -> chosen_idx = -1 and we do NOT build a meaningful frame
+Hard constraints:
+  - require_contact = ON
+  - require_stable  = ON
 
 Plane:
-  d(t) = n·p(t) - plane_offset    (signed distance to plane along normal n)
+  d(t) = n·p(t) - plane_offset
 
 Contact:
   first_contact = first index where d(t) <= contact_d_thresh
@@ -27,16 +35,32 @@ Local frame per demo:
   y = progression direction averaged over stable window, projected onto plane
   x = y × z (right-handed), then re-orthogonalize y = z × x
 Origin:
-  origin = pos[chosen_idx]    (stable point itself; then we force z_local(chosen)=0)
+  origin = pos[chosen_idx]  and force z_local(chosen)=0
+
+Crop:
+  [chosen_idx-pad .. last_contact+pad] where last_contact found by z_local sign crossing
+
+Phase alignment (event-based):
+  chosen_idx_crop -> phase 0
+  contact_end_idx_crop -> phase 1
+  piecewise-linear time warp:
+    [0 .. chosen]   -> [0 .. 0] (collapsed), handled by mapping chosen->0 and earlier portion to [0, eps]
+    [chosen .. end] -> [0 .. 1]
+  Practically:
+    build a monotonic phase per sample:
+      phase[t] = (t - chosen) / max(1, (contact_end - chosen))
+    then resample onto fixed phase grid [0..1] with interpolation.
+  (This is robust, and keeps your crop pad samples.)
+
+SO(3) log map:
+  - unwrap quaternion signs within demo
+  - reference orientation = q_local[chosen]
+  - R_rel(t) = R_ref^T R(t)
+  - w(t) = log(R_rel(t)) in R^3 (axis-angle vector)
 
 Saves:
-  out_npz with:
-    - X_local (full length)
-    - frame metadata + indices
-    - X_crop, X_local_crop, demo_ptr_crop, demo_names_crop
-      where each demo is cropped to [chosen_idx-pad .. last_contact+pad]
-    - NEW: skill_id_crop, t_crop  (aligned 1:1 with X_crop rows)
-  per-demo plot images (d, v_n raw/smooth, z_local)
+  - original outputs + X_local, X_crop, X_local_crop
+  - NEW: X_phase_crop, W_phase_crop, phase_grid, demo_ptr_phase, demo_names_phase
 """
 
 from __future__ import annotations
@@ -66,6 +90,11 @@ def q_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
     w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
     return np.array([x, y, z, w], dtype=np.float64)
+
+
+def q_conj(q: np.ndarray) -> np.ndarray:
+    x, y, z, w = q
+    return np.array([-x, -y, -z, w], dtype=np.float64)
 
 
 def R_from_q(q: np.ndarray) -> np.ndarray:
@@ -115,6 +144,70 @@ def q_from_R(R: np.ndarray) -> np.ndarray:
             z = 0.25 * S
 
     return q_normalize(np.array([x, y, z, w], dtype=np.float64))
+
+
+def unwrap_quat_signs(quat: np.ndarray) -> np.ndarray:
+    """
+    Ensure temporal continuity: if dot(q[t], q[t-1]) < 0, flip q[t].
+    quat: (T,4) xyzw
+    """
+    q = np.asarray(quat, dtype=np.float64).copy()
+    if q.shape[0] <= 1:
+        return q
+    q[0] = q_normalize(q[0])
+    for t in range(1, q.shape[0]):
+        q[t] = q_normalize(q[t])
+        if float(np.dot(q[t], q[t - 1])) < 0.0:
+            q[t] *= -1.0
+    return q
+
+
+# ----------------------------
+# SO(3) log map (rotation matrix -> rotvec)
+# ----------------------------
+def so3_log(R: np.ndarray) -> np.ndarray:
+    """
+    Log map from SO(3) to R^3 (rotation vector).
+    Uses stable acos+vee formula; handles small angles.
+    """
+    R = np.asarray(R, dtype=np.float64)
+    tr = np.trace(R)
+    cos_theta = (tr - 1.0) * 0.5
+    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+    theta = float(np.arccos(cos_theta))
+
+    if theta < 1e-8:
+        # small-angle approx: vee(R - R^T)/2
+        w = 0.5 * np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]], dtype=np.float64)
+        return w
+
+    # general case
+    w_hat = (R - R.T) / (2.0 * np.sin(theta))
+    w = np.array([w_hat[2, 1], w_hat[0, 2], w_hat[1, 0]], dtype=np.float64)
+    return theta * w
+
+
+def quat_to_rotvec_rel(quat_local: np.ndarray, ref_idx: int) -> np.ndarray:
+    """
+    quat_local: (T,4) xyzw (should be unwrapped)
+    ref_idx: chosen_idx (>=0)
+    Returns rotvec w(t) where:
+      R_rel = R_ref^T R_t
+      w = log(R_rel) in R^3
+    """
+    ql = np.asarray(quat_local, dtype=np.float64)
+    T = ql.shape[0]
+    if ref_idx < 0 or ref_idx >= T:
+        return np.zeros((T, 3), dtype=np.float64)
+
+    R_ref = R_from_q(ql[ref_idx])
+    R_ref_T = R_ref.T
+    w = np.zeros((T, 3), dtype=np.float64)
+    for t in range(T):
+        Rt = R_from_q(ql[t])
+        R_rel = R_ref_T @ Rt
+        w[t] = so3_log(R_rel)
+    return w
 
 
 # ----------------------------
@@ -255,7 +348,7 @@ def build_local_frame_from_demo(
     )
 
     if stable_idx < 0:
-        # dummy frame (keeps pipeline alive, but chosen stays -1)
+        # dummy frame
         origin = pos[0].copy()
         tmp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         if abs(np.dot(tmp, z)) > 0.9:
@@ -269,7 +362,7 @@ def build_local_frame_from_demo(
     chosen_idx = stable_idx
     origin = pos[chosen_idx].copy()
 
-    # Y axis from stable window (you hard-coded 100 in your version; keep behavior)
+    # your original behavior: stable_len=100 for direction estimation
     y = stable_window_direction(pos, z, stable_idx=chosen_idx, stable_len=100, use_mean_diffs=True)
 
     if np.linalg.norm(y) < 1e-9:
@@ -336,29 +429,124 @@ def find_contact_segment_from_zlocal_exact(z_local: np.ndarray, chosen_idx: int)
     return chosen_idx, last_t
 
 
+# ----------------------------
+# Event-based phase alignment resampling
+# ----------------------------
+def resample_piecewise_timewarp_3seg(
+    Y: np.ndarray,              # (T,dim)
+    chosen_idx: int,            # within [0, T)
+    contact_end_idx: int,       # within [0, T)
+    phase_grid: np.ndarray,     # (P,) in [0,1]
+    a_ratio: float = 0.15,      # approach portion in [0,1]
+    b_ratio: float = 0.15,      # depart portion in [0,1]
+) -> np.ndarray:
+    """
+    3-segment piecewise time-warp onto phase_grid in [0,1].
+
+    Segments (by indices):
+      approach: [0 .. chosen_idx]           -> phase [0 .. a_ratio]
+      work:     [chosen_idx .. contact_end] -> phase [a_ratio .. 1-b_ratio]
+      depart:   [contact_end .. T-1]        -> phase [1-b_ratio .. 1]
+
+    If segments are degenerate, it falls back gracefully.
+    Uses linear interpolation, no extrapolation outside [0,1].
+    """
+    Y = np.asarray(Y, dtype=np.float64)
+    if Y.ndim == 1:
+        Y = Y.reshape(-1, 1)
+    T, dim = Y.shape
+    P = int(phase_grid.shape[0])
+    out = np.zeros((P, dim), dtype=np.float64)
+
+    # guard ratios
+    a = float(np.clip(a_ratio, 0.0, 0.49))
+    b = float(np.clip(b_ratio, 0.0, 0.49))
+    if a + b >= 0.98:
+        a, b = 0.15, 0.15
+
+    # invalid chosen -> uniform time resample
+    if chosen_idx < 0 or chosen_idx >= T:
+        tt = np.linspace(0.0, 1.0, T)
+        for k in range(dim):
+            out[:, k] = np.interp(phase_grid, tt, Y[:, k])
+        return out
+
+    # clamp contact_end
+    if contact_end_idx < 0:
+        contact_end_idx = T - 1
+    contact_end_idx = int(np.clip(contact_end_idx, 0, T - 1))
+
+    # enforce order: chosen <= contact_end
+    chosen_idx = int(chosen_idx)
+    if contact_end_idx < chosen_idx:
+        contact_end_idx = chosen_idx
+
+    # build phase per sample (monotonic)
+    phase = np.zeros((T,), dtype=np.float64)
+
+    # ----- segment 1: approach -----
+    if chosen_idx == 0:
+        phase[0] = a
+    else:
+        # map t=0 -> 0, t=chosen -> a
+        phase[: chosen_idx + 1] = np.linspace(0.0, a, chosen_idx + 1)
+
+    # ----- segment 2: work -----
+    if contact_end_idx == chosen_idx:
+        phase[chosen_idx : contact_end_idx + 1] = a  # collapsed work
+    else:
+        # map chosen -> a, contact_end -> 1-b
+        phase[chosen_idx : contact_end_idx + 1] = np.linspace(
+            a, 1.0 - b, (contact_end_idx - chosen_idx) + 1
+        )
+
+    # ----- segment 3: depart -----
+    if contact_end_idx == T - 1:
+        phase[T - 1] = 1.0
+    else:
+        # map contact_end -> 1-b, last -> 1
+        phase[contact_end_idx:] = np.linspace(
+            1.0 - b, 1.0, (T - contact_end_idx)
+        )
+
+    # final monotonic safety
+    for t in range(1, T):
+        if phase[t] < phase[t - 1]:
+            phase[t] = phase[t - 1]
+    phase = np.clip(phase, 0.0, 1.0)
+
+    # interpolate each dimension
+    for k in range(dim):
+        out[:, k] = np.interp(phase_grid, phase, Y[:, k])
+    return out
+
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_npz", default="/home/sungboo/rb10_control/dataset/demo_20260122.npz")
-    ap.add_argument("--out_npz", default="/home/sungboo/rb10_control/dataset/demo_20260122_final.npz")
+    ap.add_argument("--out_npz", default="/home/sungboo/rb10_control/dataset/demo_20260122_final_phase_logmap.npz")
 
     # plane / normal
     ap.add_argument("--plane_offset", type=float, default=-0.779)
     ap.add_argument("--wall_quat", type=float, nargs=4, default=[0.5, -0.5, -0.5, 0.5])
 
     # thresholds
-    ap.add_argument("--dist_eps", type=float, default=0.003, help="Contact tolerance: require d(t) <= dist_eps (m).")
-    ap.add_argument("--vn_eps", type=float, default=0.0004, help="Normal velocity stability threshold (m/step).")
-    ap.add_argument("--stable_len", type=int, default=20, help="Consecutive steps for stability.")
-    ap.add_argument("--min_after_contact", type=int, default=0, help="Start stable search after first_contact + this.")
-    ap.add_argument("--vn_smooth_win", type=int, default=9, help="Moving average window for vn (odd recommended).")
-    ap.add_argument("--min_start", type=int, default=30, help="Minimum start index (hard constraint).")
+    ap.add_argument("--dist_eps", type=float, default=0.003)
+    ap.add_argument("--vn_eps", type=float, default=0.0005)
+    ap.add_argument("--stable_len", type=int, default=20)
+    ap.add_argument("--min_after_contact", type=int, default=0)
+    ap.add_argument("--vn_smooth_win", type=int, default=9)
+    ap.add_argument("--min_start", type=int, default=30)
     ap.add_argument("--contact_window", type=int, default=10)
 
-    ap.add_argument("--crop_pad", type=int, default=20, help="Pad length added before chosen_idx and after last_contact (steps).")
+    ap.add_argument("--crop_pad", type=int, default=20)
+    ap.add_argument("--phase_pad", type=int, default=0.1)
 
-    # plotting
+    # phase alignment (hard-ish)
+    ap.add_argument("--phase_len", type=int, default=200, help="Fixed length for phase-aligned sequences.")
     ap.add_argument("--plot", action="store_true")
-    ap.add_argument("--plot_demo_indices", type=int, nargs="*", default=[0, 4, 8, 12, 208])
+    ap.add_argument("--plot_demo_indices", type=int, nargs="*", default=[0, 2, 36, 208])
     ap.add_argument("--img_dir", default="/home/sungboo/rb10_control/images/demo_20260122/preprocessing")
     args = ap.parse_args()
 
@@ -377,7 +565,6 @@ def main():
     D = ptr.shape[0] - 1
     names = dnpz["demo_names"] if "demo_names" in dnpz else np.array([f"demo_{i}" for i in range(D)], dtype=object)
 
-    # Optional per-step labels
     has_skill = "skill_id" in dnpz
     has_t = "t" in dnpz
     skill_full = dnpz["skill_id"] if has_skill else None
@@ -396,7 +583,7 @@ def main():
     stable_index = np.full((D,), -1, dtype=np.int32)
     first_contact_index = np.full((D,), -1, dtype=np.int32)
 
-    # Cropped buffers (per-demo)
+    # Cropped buffers
     X_crop_list: list[np.ndarray] = []
     Xlocal_crop_list: list[np.ndarray] = []
     skill_crop_list: list[np.ndarray] = []
@@ -414,6 +601,7 @@ def main():
     stable_new_list: list[int] = []
     first_contact_new_list: list[int] = []
 
+    # For optional plots
     debug_series = {}
     plot_set = set(args.plot_demo_indices)
 
@@ -422,7 +610,6 @@ def main():
         pos = X[s:e, 0:3].astype(np.float64)
         quat = X[s:e, 3:7].astype(np.float64)
 
-        # init so debug_series never hits unbound locals
         c_start = c_end = -1
         crop_s = crop_e = -1
 
@@ -441,7 +628,7 @@ def main():
 
         pos_l, quat_l = transform_demo_to_local(pos, quat, origin, R_l2b)
 
-        # enforce z_local(chosen) == 0 when chosen exists
+        # enforce z_local(chosen) == 0
         if chosen_idx >= 0:
             z0 = float(pos_l[chosen_idx, 2])
             pos_l[:, 2] -= z0
@@ -457,7 +644,7 @@ def main():
         stable_index[i] = stable_idx
         first_contact_index[i] = first_c
 
-        # crop around contact segment (only if chosen exists)
+        # crop around contact segment
         if chosen_idx >= 0:
             zloc = pos_l[:, 2].astype(np.float64)
             c_start, c_end = find_contact_segment_from_zlocal_exact(z_local=zloc, chosen_idx=chosen_idx)
@@ -475,7 +662,6 @@ def main():
                 Xc = X_demo[crop_s:crop_e]
                 Xlc = Xl_demo[crop_s:crop_e]
 
-                # crop labels (optional) -> but we WILL save skill_id_crop / t_crop if present
                 if has_skill:
                     sc = np.asarray(skill_full[s:e])[crop_s:crop_e]
                     skill_crop_list.append(sc.astype(skill_full.dtype, copy=False))
@@ -520,7 +706,9 @@ def main():
                 "crop_e": int(crop_e),
             }
 
-    # save npz
+    # ----------------------------
+    # save base outputs
+    # ----------------------------
     out = {k: dnpz[k] for k in dnpz.files}
 
     out["X_local"] = X_local
@@ -541,7 +729,9 @@ def main():
     out["vn_smooth_win"] = np.array([args.vn_smooth_win], dtype=np.int32)
     out["crop_pad"] = np.array([args.crop_pad], dtype=np.int32)
 
+    # ----------------------------
     # finalize cropped arrays
+    # ----------------------------
     if len(X_crop_list) == 0:
         print("[warn] No demos kept for cropped output (no chosen/stable found).")
         X_crop = np.zeros((0, X.shape[1]), dtype=np.float32)
@@ -549,44 +739,117 @@ def main():
         demo_ptr_crop_arr = np.array([0], dtype=np.int64)
         demo_names_crop_arr = np.array([], dtype=object)
 
-        # still create empty label arrays if originals exist
         if has_skill:
             out["skill_id_crop"] = np.zeros((0,), dtype=skill_full.dtype)
         if has_t:
             out["t_crop"] = np.zeros((0,), dtype=t_full.dtype)
+
+        out["X_crop"] = X_crop
+        out["X_local_crop"] = X_local_crop
+        out["demo_ptr_crop"] = demo_ptr_crop_arr
+        out["demo_names_crop"] = demo_names_crop_arr
+
+        # empty phase outputs too
+        out["phase_grid"] = np.linspace(0.0, 1.0, int(args.phase_len), dtype=np.float64)
+        out["X_phase_crop"] = np.zeros((0, 3), dtype=np.float32)
+        out["W_phase_crop"] = np.zeros((0, 3), dtype=np.float32)
+        out["demo_ptr_phase"] = np.array([0], dtype=np.int64)
+        out["demo_names_phase"] = np.array([], dtype=object)
+
     else:
         X_crop = np.concatenate(X_crop_list, axis=0).astype(np.float32)
         X_local_crop = np.concatenate(Xlocal_crop_list, axis=0).astype(np.float32)
         demo_ptr_crop_arr = np.array(demo_ptr_crop, dtype=np.int64)
         demo_names_crop_arr = np.array(demo_names_crop, dtype=object)
 
+        out["X_crop"] = X_crop
+        out["X_local_crop"] = X_local_crop
+        out["demo_ptr_crop"] = demo_ptr_crop_arr
+        out["demo_names_crop"] = demo_names_crop_arr
+
         if has_skill:
             out["skill_id_crop"] = np.concatenate(skill_crop_list, axis=0).astype(skill_full.dtype, copy=False)
         if has_t:
             out["t_crop"] = np.concatenate(t_crop_list, axis=0).astype(t_full.dtype, copy=False)
 
-    out["X_crop"] = X_crop
-    out["X_local_crop"] = X_local_crop
-    out["demo_ptr_crop"] = demo_ptr_crop_arr
-    out["demo_names_crop"] = demo_names_crop_arr
+        out["kept_orig_demo_index"] = np.array(kept_orig_demo_index, dtype=np.int32)
+        out["crop_s"] = np.array(crop_s_list, dtype=np.int32)
+        out["crop_e"] = np.array(crop_e_list, dtype=np.int32)
+        out["contact_start_idx"] = np.array(contact_start_list, dtype=np.int32)
+        out["contact_end_idx"] = np.array(contact_end_list, dtype=np.int32)
+        out["chosen_index_crop"] = np.array(chosen_new_list, dtype=np.int32)
+        out["stable_index_crop"] = np.array(stable_new_list, dtype=np.int32)
+        out["first_contact_index_crop"] = np.array(first_contact_new_list, dtype=np.int32)
 
-    out["kept_orig_demo_index"] = np.array(kept_orig_demo_index, dtype=np.int32)
-    out["crop_s"] = np.array(crop_s_list, dtype=np.int32)
-    out["crop_e"] = np.array(crop_e_list, dtype=np.int32)
-    out["contact_start_idx"] = np.array(contact_start_list, dtype=np.int32)
-    out["contact_end_idx"] = np.array(contact_end_list, dtype=np.int32)
-    out["chosen_index_crop"] = np.array(chosen_new_list, dtype=np.int32)
-    out["stable_index_crop"] = np.array(stable_new_list, dtype=np.int32)
-    out["first_contact_index_crop"] = np.array(first_contact_new_list, dtype=np.int32)
+        out["contact_def"] = np.array(
+            ["contact segment := [chosen_idx .. last idx where z_local <=0 then leaves to >0] (sign-crossing), then padded by crop_pad"],
+            dtype=object,
+        )
 
-    out["contact_def"] = np.array(
-        ["contact segment := [chosen_idx .. last idx where z_local <=0 then leaves to >0] (sign-crossing), then padded by crop_pad"],
-        dtype=object,
-    )
+        # ----------------------------
+        # NEW: Phase alignment + SO(3) log-map (MP-ready)
+        # ----------------------------
+        phase_len = int(args.phase_len)
+        phase_grid = np.linspace(0.0, 1.0, phase_len, dtype=np.float64)
+        out["phase_grid"] = phase_grid
 
+        # build per-demo fixed-length sequences
+        X_phase_list = []
+        W_phase_list = []
+        demo_ptr_phase = [0]
+        demo_names_phase = []
+
+        ptrc = demo_ptr_crop_arr
+        Dc = int(ptrc.shape[0] - 1)
+
+        # require these indices
+        chosen_crop = out["chosen_index_crop"]
+        cend_crop = out["contact_end_idx"]
+
+        for di in range(Dc):
+            a, b = int(ptrc[di]), int(ptrc[di + 1])
+            if b <= a:
+                continue
+
+            Xlc_demo = X_local_crop[a:b]               # (T,dim) local
+            pos_l = Xlc_demo[:, 0:3].astype(np.float64)
+            quat_l = Xlc_demo[:, 3:7].astype(np.float64)
+
+            ci = int(chosen_crop[di])  # chosen index within this cropped demo
+            ce = int(cend_crop[di])    # contact end within this cropped demo
+
+            # 1) quaternion sign unwrap (within demo)
+            quat_l_u = unwrap_quat_signs(quat_l)
+
+            # 2) rotvec (log map) relative to orientation at chosen
+            w = quat_to_rotvec_rel(quat_l_u, ref_idx=ci)  # (T,3)
+
+            # 3) event-based phase resample
+            pos_rs = resample_piecewise_timewarp_3seg(
+                pos_l, chosen_idx=ci, contact_end_idx=ce, phase_grid=phase_grid,
+                a_ratio=args.phase_pad, b_ratio=args.phase_pad
+            )
+            w_rs = resample_piecewise_timewarp_3seg(
+                w, chosen_idx=ci, contact_end_idx=ce, phase_grid=phase_grid,
+                a_ratio=args.phase_pad, b_ratio=args.phase_pad
+            )
+
+            X_phase_list.append(pos_rs.astype(np.float32))
+            W_phase_list.append(w_rs.astype(np.float32))
+            demo_names_phase.append(demo_names_crop_arr[di])
+            demo_ptr_phase.append(demo_ptr_phase[-1] + phase_len)
+
+        out["X_phase_crop"] = np.concatenate(X_phase_list, axis=0).reshape(-1, 3).astype(np.float32)
+        out["W_phase_crop"] = np.concatenate(W_phase_list, axis=0).reshape(-1, 3).astype(np.float32)
+        out["demo_ptr_phase"] = np.array(demo_ptr_phase, dtype=np.int64)
+        out["demo_names_phase"] = np.array(demo_names_phase, dtype=object)
+
+    # save
     np.savez_compressed(out_path, **out)
 
+    # ----------------------------
     # plots (optional)
+    # ----------------------------
     if args.plot:
         import matplotlib.pyplot as plt
 
@@ -737,27 +1000,62 @@ def main():
             plt.savefig(str(img_dir / f"demo_{i:03d}_d_vnraw_vnsm_zlocal.png"))
             plt.close()
 
-    # summary print (always)
+        # phase-aligned sanity plot for a few cropped demos
+        if ("X_phase_crop" in out) and (out["demo_ptr_phase"].shape[0] > 1):
+            ptrp = out["demo_ptr_phase"].astype(np.int64)
+            Xp = out["X_phase_crop"].astype(np.float64)  # (K*P,3)
+            Wp = out["W_phase_crop"].astype(np.float64)  # (K*P,3)
+            ph = out["phase_grid"].astype(np.float64)
+            K = int(ptrp.shape[0] - 1)
+            
+            show = list(range(K))
+            # z overlay
+            plt.figure(figsize=(10, 4))
+            for di in show:
+                a, b = int(ptrp[di]), int(ptrp[di + 1])
+                z = Xp[a:b, 2]
+                plt.plot(ph, z)
+            plt.axhline(0.0, linestyle="--")
+            plt.title("phase-aligned z_local overlay")
+            plt.xlabel("phase"); plt.ylabel("z_local [m]")
+            plt.tight_layout()
+            plt.savefig(str(img_dir / "phase_overlay_zlocal.png"))
+            plt.close()
+
+            # rotvec-norm overlay
+            plt.figure(figsize=(10, 4))
+            for di in show:
+                a, b = int(ptrp[di]), int(ptrp[di + 1])
+                wn = np.linalg.norm(Wp[a:b], axis=1)
+                plt.plot(ph, wn)
+            plt.title("phase-aligned ||rotvec|| overlay")
+            plt.xlabel("phase"); plt.ylabel("||w|| [rad]")
+            plt.tight_layout()
+            plt.savefig(str(img_dir / "phase_overlay_rotvecnorm.png"))
+            plt.close()
+
+    # ----------------------------
+    # summary
+    # ----------------------------
     n_contact = int(np.sum(first_contact_index >= 0))
     n_stable = int(np.sum(stable_index >= 0))
     n_chosen = int(np.sum(chosen_index >= 0))
-    n_kept = int(len(kept_orig_demo_index))
+    n_kept = int(len(out.get("kept_orig_demo_index", [])))
 
     print(f"[saved] {out_path}")
     print(f"  demos: {D}")
-    print(f"  contact_found: {n_contact}/{D}   (require d<=dist_eps)")
-    print(f"  stable_found:  {n_stable}/{D}   (require d<=dist_eps AND |vn_smooth|<=vn_eps for stable_len)")
-    print(f"  chosen_found:  {n_chosen}/{D}   (require_stable=ON)")
-    print(f"  cropped_kept:  {n_kept}/{D}   (chosen demos only)")
+    print(f"  contact_found: {n_contact}/{D}")
+    print(f"  stable_found:  {n_stable}/{D}")
+    print(f"  chosen_found:  {n_chosen}/{D}")
+    print(f"  cropped_kept:  {n_kept}/{D}")
     if n_kept > 0:
         print(f"  cropped total steps: {int(out['demo_ptr_crop'][-1])}")
-        if has_skill:
-            print(f"  skill_id_crop saved: shape={out['skill_id_crop'].shape}, dtype={out['skill_id_crop'].dtype}")
-        if has_t:
-            print(f"  t_crop saved:       shape={out['t_crop'].shape}, dtype={out['t_crop'].dtype}")
+        if "X_phase_crop" in out:
+            print(f"  phase_len: {int(out['phase_grid'].shape[0])}, phase demos: {int(out['demo_ptr_phase'].shape[0]-1)}")
+            print(f"  X_phase_crop: {out['X_phase_crop'].shape}, W_phase_crop: {out['W_phase_crop'].shape}")
     print(f"  wall_normal(base): {wall_normal}")
     if args.plot:
-        print(f"  figures: {img_dir}/demo_XXX_d_vnraw_vnsm_zlocal.png")
+        print(f"  figures: {img_dir}")
 
 
 if __name__ == "__main__":
