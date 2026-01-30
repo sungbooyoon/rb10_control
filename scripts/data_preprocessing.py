@@ -267,7 +267,7 @@ def build_local_frame_from_demo(
     origin = pos[chosen_idx].copy()
 
     # Y axis from stable window
-    y = stable_window_direction(pos, z, stable_idx=chosen_idx, stable_len=stable_len, use_mean_diffs=True)
+    y = stable_window_direction(pos, z, stable_idx=chosen_idx, stable_len=100, use_mean_diffs=True)
 
     if np.linalg.norm(y) < 1e-9:
         # fallback: short lookahead
@@ -322,13 +322,14 @@ def main():
     # thresholds
     ap.add_argument("--dist_eps", type=float, default=0.003, help="Contact tolerance for d(t): require d(t) <= dist_eps (m).")
     ap.add_argument("--vn_eps", type=float, default=0.0003, help="Normal velocity stability threshold (m/step).")
-    ap.add_argument("--stable_len", type=int, default=10, help="Consecutive steps for stability.")
+    ap.add_argument("--stable_len", type=int, default=20, help="Consecutive steps for stability.")
     ap.add_argument("--min_after_contact", type=int, default=0, help="Start stable search after first_contact + this.")
 
     ap.add_argument("--vn_smooth_win", type=int, default=9, help="Moving average window for vn (odd recommended).")
     ap.add_argument("--contact_window", type=int, default=10)
 
     # plotting
+    ap.add_argument("--plot", action="store_true")
     ap.add_argument("--plot_demo_indices", type=int, nargs="*", default=[0, 4, 8, 12])
     ap.add_argument("--img_dir", default="/home/sungboo/rb10_control/images/demo_20260122")
     args = ap.parse_args()
@@ -425,77 +426,173 @@ def main():
     out["vn_smooth_win"] = np.array([args.vn_smooth_win], dtype=np.int32)
     np.savez_compressed(out_path, **out)
 
-    # ---- plots
-    import matplotlib.pyplot as plt
+    
+    if args.plot:
+        # ---- 3D plots: per-demo trajectory + local frame axes
+        # Save: demo_XXX_3d_base.png, demo_XXX_3d_local.png
+        import matplotlib.pyplot as plt
 
-    for i in args.plot_demo_indices:
-        if i not in debug_series:
-            continue
+        def _set_axes_equal(ax):
+            x_limits = ax.get_xlim3d(); y_limits = ax.get_ylim3d(); z_limits = ax.get_zlim3d()
+            x_range = abs(x_limits[1] - x_limits[0]); x_mid = np.mean(x_limits)
+            y_range = abs(y_limits[1] - y_limits[0]); y_mid = np.mean(y_limits)
+            z_range = abs(z_limits[1] - z_limits[0]); z_mid = np.mean(z_limits)
+            r = 0.5 * max([x_range, y_range, z_range])
+            ax.set_xlim3d([x_mid - r, x_mid + r])
+            ax.set_ylim3d([y_mid - r, y_mid + r])
+            ax.set_zlim3d([z_mid - r, z_mid + r])
 
-        ds = debug_series[i]
-        d_series = ds["d"]
-        vn_raw = ds["vn_raw"]
-        vn_sm = ds["vn_smooth"]
-        zloc = ds["z_local"]
+        def _draw_frame(ax, origin_b, R_l2b, L=0.05):
+            """
+            Draw local axes in BASE coords.
+            R_l2b columns are local unit axes expressed in base frame.
+            """
+            o = origin_b.reshape(3,)
+            ex = R_l2b[:, 0]; ey = R_l2b[:, 1]; ez = R_l2b[:, 2]
 
-        T = d_series.shape[0]
-        tt = np.arange(T)
+            x = o + L * ex
+            y = o + L * ey
+            z = o + L * ez
 
-        fc = ds["first_contact"]
-        si = ds["stable_idx"]
-        ci = ds["chosen_idx"]
+            ax.plot([o[0], x[0]], [o[1], x[1]], [o[2], x[2]])
+            ax.plot([o[0], y[0]], [o[1], y[1]], [o[2], y[2]])
+            ax.plot([o[0], z[0]], [o[1], z[1]], [o[2], z[2]])
 
-        plt.figure(figsize=(11, 9))
+            ax.text(x[0], x[1], x[2], "Lx")
+            ax.text(y[0], y[1], y[2], "Ly")
+            ax.text(z[0], z[1], z[2], "Lz")
 
-        ax1 = plt.subplot(3, 1, 1)
-        ax1.plot(tt, d_series)
-        ax1.axhline(args.dist_eps, linestyle=":")
-        ax1.axhline(0.0, linestyle="--")
-        if fc >= 0:
-            ax1.axvline(fc, linestyle="--")
-        if si >= 0:
-            ax1.axvline(si, linestyle="-")
-        ax1.set_ylabel("d(t) [m]  (need d<=dist_eps)")
+        axis_len = 0.05  # meters (원하면 args로 빼도 됨)
 
-        ax2 = plt.subplot(3, 1, 2, sharex=ax1)
-        ax2.plot(tt, vn_raw, label="vn_raw")
-        ax2.plot(tt, vn_sm, label="vn_smooth")
-        ax2.axhline(+args.vn_eps, linestyle=":")
-        ax2.axhline(-args.vn_eps, linestyle=":")
-        ax2.axhline(0.0, linestyle="--")
-        if fc >= 0:
-            ax2.axvline(fc, linestyle="--")
-        if si >= 0:
-            ax2.axvline(si, linestyle="-")
-        ax2.set_ylabel("v_n [m/step]")
-        ax2.legend(loc="upper right")
+        for i in args.plot_demo_indices:
+            if i < 0 or i >= D:
+                continue
 
-        ax3 = plt.subplot(3, 1, 3, sharex=ax1)
-        ax3.plot(tt, zloc)
-        ax3.axhline(0.0, linestyle="--")
-        if fc >= 0:
-            ax3.axvline(fc, linestyle="--")
-        if si >= 0:
-            ax3.axvline(si, linestyle="-")
-        ax3.set_xlabel("t [step]")
-        ax3.set_ylabel("z_local(t) [m]")
+            s, e = int(ptr[i]), int(ptr[i + 1])
+            pos_b = X[s:e, 0:3].astype(np.float64)         # base trajectory
+            pos_l = X_local[s:e, 0:3].astype(np.float64)   # local trajectory (already computed)
 
-        ax1.set_title(f"{i} {ds['name']}  first={fc}  stable={si}  chosen={ci}")
-        plt.tight_layout()
-        plt.savefig(str(img_dir / f"demo_{i:03d}_d_vnraw_vnsm_zlocal.png"))
-        plt.close()
+            origin_b = frame_origin[i].astype(np.float64)
+            R_l2b = frame_R[i].astype(np.float64)
 
-    n_contact = int(np.sum(first_contact_index >= 0))
-    n_stable = int(np.sum(stable_index >= 0))
-    n_chosen = int(np.sum(chosen_index >= 0))
+            ci = int(chosen_index[i])
+            si = int(stable_index[i])
+            fc = int(first_contact_index[i])
 
-    print(f"[saved] {out_path}")
-    print(f"  demos: {D}")
-    print(f"  contact_found: {n_contact}/{D}   (require d<=dist_eps)")
-    print(f"  stable_found:  {n_stable}/{D}   (require d<=dist_eps AND |vn_smooth|<=vn_eps for stable_len)")
-    print(f"  chosen_found:  {n_chosen}/{D}   (require_stable=ON)")
-    print(f"  wall_normal(base): {wall_normal}")
-    print(f"  figures: {img_dir}/demo_XXX_d_vnraw_vnsm_zlocal.png")
+            # (A) BASE view: base traj + local frame axes
+            fig = plt.figure(figsize=(10, 8))
+            ax = fig.add_subplot(111, projection="3d")
+            ax.plot(pos_b[:, 0], pos_b[:, 1], pos_b[:, 2])
+            ax.scatter(pos_b[0, 0], pos_b[0, 1], pos_b[0, 2], s=25)      # start
+            ax.scatter(pos_b[-1, 0], pos_b[-1, 1], pos_b[-1, 2], s=25)   # end
+
+            # mark contact/stable/chosen points if valid
+            if fc >= 0 and fc < pos_b.shape[0]:
+                ax.scatter(pos_b[fc, 0], pos_b[fc, 1], pos_b[fc, 2], s=35)
+            if si >= 0 and si < pos_b.shape[0]:
+                ax.scatter(pos_b[si, 0], pos_b[si, 1], pos_b[si, 2], s=45)
+            if ci >= 0 and ci < pos_b.shape[0]:
+                ax.scatter(pos_b[ci, 0], pos_b[ci, 1], pos_b[ci, 2], s=55)
+
+            _draw_frame(ax, origin_b, R_l2b, L=axis_len)
+            ax.set_title(f"BASE traj + LOCAL frame (R_l2b) | demo={i} {names[i]} | first={fc} stable={si} chosen={ci}")
+            ax.set_xlabel("x_base [m]"); ax.set_ylabel("y_base [m]"); ax.set_zlabel("z_base [m]")
+            _set_axes_equal(ax)
+            plt.tight_layout()
+            plt.savefig(str(img_dir / f"demo_{i:03d}_3d_base.png"))
+            plt.close(fig)
+
+            # (B) LOCAL view: local traj + identity local axes
+            fig = plt.figure(figsize=(10, 8))
+            ax = fig.add_subplot(111, projection="3d")
+            ax.plot(pos_l[:, 0], pos_l[:, 1], pos_l[:, 2])
+            ax.scatter(pos_l[0, 0], pos_l[0, 1], pos_l[0, 2], s=25)
+            ax.scatter(pos_l[-1, 0], pos_l[-1, 1], pos_l[-1, 2], s=25)
+
+            # axes at origin in local coords
+            L = axis_len
+            ax.plot([0, L], [0, 0], [0, 0]); ax.text(L, 0, 0, "Lx")
+            ax.plot([0, 0], [0, L], [0, 0]); ax.text(0, L, 0, "Ly")
+            ax.plot([0, 0], [0, 0], [0, L]); ax.text(0, 0, L, "Lz")
+
+            ax.set_title(f"LOCAL traj + LOCAL axes | demo={i} {names[i]} | first={fc} stable={si} chosen={ci}")
+            ax.set_xlabel("x_local [m]"); ax.set_ylabel("y_local [m]"); ax.set_zlabel("z_local [m]")
+            _set_axes_equal(ax)
+            plt.tight_layout()
+            plt.savefig(str(img_dir / f"demo_{i:03d}_3d_local.png"))
+            plt.close(fig)
+
+        # ---- plots
+        import matplotlib.pyplot as plt
+
+        for i in args.plot_demo_indices:
+            if i not in debug_series:
+                continue
+
+            ds = debug_series[i]
+            d_series = ds["d"]
+            vn_raw = ds["vn_raw"]
+            vn_sm = ds["vn_smooth"]
+            zloc = ds["z_local"]
+
+            T = d_series.shape[0]
+            tt = np.arange(T)
+
+            fc = ds["first_contact"]
+            si = ds["stable_idx"]
+            ci = ds["chosen_idx"]
+
+            plt.figure(figsize=(11, 9))
+
+            ax1 = plt.subplot(3, 1, 1)
+            ax1.plot(tt, d_series)
+            ax1.axhline(args.dist_eps, linestyle=":")
+            ax1.axhline(0.0, linestyle="--")
+            if fc >= 0:
+                ax1.axvline(fc, linestyle="--")
+            if si >= 0:
+                ax1.axvline(si, linestyle="-")
+            ax1.set_ylabel("d(t) [m]  (need d<=dist_eps)")
+
+            ax2 = plt.subplot(3, 1, 2, sharex=ax1)
+            ax2.plot(tt, vn_raw, label="vn_raw")
+            ax2.plot(tt, vn_sm, label="vn_smooth")
+            ax2.axhline(+args.vn_eps, linestyle=":")
+            ax2.axhline(-args.vn_eps, linestyle=":")
+            ax2.axhline(0.0, linestyle="--")
+            if fc >= 0:
+                ax2.axvline(fc, linestyle="--")
+            if si >= 0:
+                ax2.axvline(si, linestyle="-")
+            ax2.set_ylabel("v_n [m/step]")
+            ax2.legend(loc="upper right")
+
+            ax3 = plt.subplot(3, 1, 3, sharex=ax1)
+            ax3.plot(tt, zloc)
+            ax3.axhline(0.0, linestyle="--")
+            if fc >= 0:
+                ax3.axvline(fc, linestyle="--")
+            if si >= 0:
+                ax3.axvline(si, linestyle="-")
+            ax3.set_xlabel("t [step]")
+            ax3.set_ylabel("z_local(t) [m]")
+
+            ax1.set_title(f"{i} {ds['name']}  first={fc}  stable={si}  chosen={ci}")
+            plt.tight_layout()
+            plt.savefig(str(img_dir / f"demo_{i:03d}_d_vnraw_vnsm_zlocal.png"))
+            plt.close()
+
+        n_contact = int(np.sum(first_contact_index >= 0))
+        n_stable = int(np.sum(stable_index >= 0))
+        n_chosen = int(np.sum(chosen_index >= 0))
+
+        print(f"[saved] {out_path}")
+        print(f"  demos: {D}")
+        print(f"  contact_found: {n_contact}/{D}   (require d<=dist_eps)")
+        print(f"  stable_found:  {n_stable}/{D}   (require d<=dist_eps AND |vn_smooth|<=vn_eps for stable_len)")
+        print(f"  chosen_found:  {n_chosen}/{D}   (require_stable=ON)")
+        print(f"  wall_normal(base): {wall_normal}")
+        print(f"  figures: {img_dir}/demo_XXX_d_vnraw_vnsm_zlocal.png")
 
 
 if __name__ == "__main__":
