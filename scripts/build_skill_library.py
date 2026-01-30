@@ -387,6 +387,53 @@ def compute_y_length(y: np.ndarray) -> float:
     """
     return float(y[-1] - y[0])
 
+def filter_demos_by_index(
+    X_phase: np.ndarray,
+    W_phase: np.ndarray,
+    ptr_phase: np.ndarray,
+    ptr_crop: np.ndarray,
+    demo_skill: np.ndarray,
+    drop_ids: list[int],
+):
+    """
+    Remove demos with indices in drop_ids from BOTH phase and crop timelines.
+
+    Returns:
+    X_phase_new, W_phase_new, ptr_phase_new, ptr_crop_new, demo_skill_new
+    """
+    drop_ids = sorted(set(int(i) for i in drop_ids))
+    D = ptr_phase.shape[0] - 1
+
+    keep = [i for i in range(D) if i not in drop_ids]
+    if len(keep) == D:
+        return X_phase, W_phase, ptr_phase, ptr_crop, demo_skill
+
+    Xp_new, Wp_new = [], []
+    ptrp_new = [0]
+    ptrc_new = [0]
+    demo_skill_new = []
+
+    for i in keep:
+        sp, ep = int(ptr_phase[i]), int(ptr_phase[i + 1])
+        Xp_new.append(X_phase[sp:ep])
+        Wp_new.append(W_phase[sp:ep])
+        ptrp_new.append(ptrp_new[-1] + (ep - sp))
+
+        sc, ec = int(ptr_crop[i]), int(ptr_crop[i + 1])
+        ptrc_new.append(ptrc_new[-1] + (ec - sc))
+
+        demo_skill_new.append(int(demo_skill[i]))
+
+    Xp_new = np.concatenate(Xp_new, axis=0)
+    Wp_new = np.concatenate(Wp_new, axis=0)
+
+    return (
+        Xp_new,
+        Wp_new,
+        np.asarray(ptrp_new, dtype=np.int64),
+        np.asarray(ptrc_new, dtype=np.int64),
+        np.asarray(demo_skill_new, dtype=np.int64),
+    )
 
 
 def main():
@@ -413,6 +460,15 @@ def main():
     ap.add_argument("--outlier_topk", type=int, default=3, help="per-skill top-k outliers by RMSE_pos vs ProMP mean")
     ap.add_argument("--outlier_maxplot", type=int, default=10, help="cap number of demos to overlay per outlier plot (safety)")
 
+    # NEW: drop demo indices at load time
+    ap.add_argument(
+        "--drop_demos",
+        type=int,
+        nargs="*",
+        default=[36, 57, 98, 202],
+        help="List of demo indices (phase/crop) to drop entirely before building skill library",
+    )
+
     args = ap.parse_args()
 
     npz_path = Path(args.npz)
@@ -435,10 +491,9 @@ def main():
     Xp = np.asarray(data["X_phase_crop"], dtype=np.float64)  # (N_phase,3)
     Wp = np.asarray(data["W_phase_crop"], dtype=np.float64)  # (N_phase,3)
     ptrp = np.asarray(data["demo_ptr_phase"], dtype=np.int64)  # (D_phase+1,)
-    Dc_phase = int(ptrp.shape[0] - 1)
+    ptrc = np.asarray(data["demo_ptr_crop"], dtype=np.int64)   # (D_crop+1,)
 
-    # For skill ids, we infer from crop timeline (demo_ptr_crop), then map to phase demos 1:1
-    ptrc = np.asarray(data["demo_ptr_crop"], dtype=np.int64)
+    Dc_phase = int(ptrp.shape[0] - 1)
     Dc_crop = int(ptrc.shape[0] - 1)
     if Dc_phase != Dc_crop:
         raise ValueError(f"Mismatch demos: D_phase={Dc_phase} != D_crop={Dc_crop}. Phase build assumed 1:1 demo.")
@@ -446,7 +501,6 @@ def main():
     # Phase grid (optional)
     phase_grid = np.asarray(data["phase_grid"], dtype=np.float64) if "phase_grid" in data else None
     if phase_grid is None:
-        # infer constant phase length from first demo
         if Dc_phase <= 0:
             raise ValueError("No phase demos found.")
         phase_len = int(ptrp[1] - ptrp[0])
@@ -454,14 +508,39 @@ def main():
     else:
         phase_len = int(phase_grid.shape[0])
 
-    # Build concatenated 6D trajectories for learning (확인: 6D 맞음)
-    # Y_all shape: (N_phase, 6)
+    # skill ids per demo (inferred from crop timeline)
+    demo_skill = infer_demo_skill_ids(data, ptrc)  # (D,)
+
+    # --------------------
+    # NEW: DROP DEMOS EARLY (keep phase/crop consistent)
+    # --------------------
+    if len(args.drop_demos) > 0:
+        drop_set = sorted(set(int(i) for i in args.drop_demos))
+        print(f"[info] Dropping demos: {drop_set}")
+
+        # validate indices
+        bad = [i for i in drop_set if i < 0 or i >= Dc_phase]
+        if bad:
+            raise ValueError(f"--drop_demos contains out-of-range indices: {bad} (valid: 0..{Dc_phase-1})")
+
+        Xp, Wp, ptrp, ptrc, demo_skill = filter_demos_by_index(
+            X_phase=Xp,
+            W_phase=Wp,
+            ptr_phase=ptrp,
+            ptr_crop=ptrc,
+            demo_skill=demo_skill,
+            drop_ids=drop_set,
+        )
+
+        Dc_phase = int(ptrp.shape[0] - 1)
+        Dc_crop = int(ptrc.shape[0] - 1)
+        if Dc_phase != Dc_crop:
+            raise RuntimeError("After dropping demos: D_phase != D_crop (should not happen)")
+
+    # Build concatenated 6D trajectories for learning
     Y_all = np.concatenate([Xp, Wp], axis=1)
     if Y_all.shape[1] != 6:
         raise ValueError(f"Expected 6D (xyz+rotvec), but got Y_all.shape={Y_all.shape}")
-
-    # skill ids per demo
-    demo_skill = infer_demo_skill_ids(data, ptrc)  # (D,)
 
     # group by skill
     skill_to_demo_idxs: dict[int, list[int]] = {}
@@ -597,6 +676,7 @@ def main():
         "skill_ids_present": sorted(list(skill_to_demo_idxs.keys())),
         "n_phase_demos": int(Dc_phase),
         "n_phase_steps": int(Y_all.shape[0]),
+        "drop_demos": list(map(int, args.drop_demos)),
     }
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
