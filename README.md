@@ -157,3 +157,5 @@ python3 /home/sungboo/rb10_control/scripts/data_preprocessing.py
 # 6-1. Robomimc training (Diffusion)
 python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
 
+# 6-2. ProMP modeling
+python /home/sungboo/rb10_control/scripts/build_skill_library.py --model promp --plot --plot_demo 0

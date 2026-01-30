@@ -3,7 +3,8 @@
 
 """
 Per-demo contact-origin local frame transform + verification plots (NO z-flip)
-+ NEW: crop & save around contact segment
++ crop & save around contact segment
++ NEW: also save skill_id_crop, t_crop aligned with X_crop
 
 Hard constraints (no CLI options):
   - require_contact = ON  : stable search happens only after d(t) <= contact_d_thresh
@@ -32,9 +33,9 @@ Saves:
   out_npz with:
     - X_local (full length)
     - frame metadata + indices
-    - NEW: X_crop, X_local_crop, demo_ptr_crop, demo_names_crop
-          where each demo is cropped to [chosen_idx-pad .. last_contact+pad]
-          and contact segment is [chosen_idx .. last_contact] defined by exact z_local==0
+    - X_crop, X_local_crop, demo_ptr_crop, demo_names_crop
+      where each demo is cropped to [chosen_idx-pad .. last_contact+pad]
+    - NEW: skill_id_crop, t_crop  (aligned 1:1 with X_crop rows)
   per-demo plot images (d, v_n raw/smooth, z_local)
 """
 
@@ -198,28 +199,23 @@ def find_contact_and_stable(
 ) -> tuple[int, int]:
     """
     HARD:
-      - search starts only after min_start (e.g., 30 steps from demo start)
-      - first_contact defined as first t >= min_start with d(t) <= thresh
-      - stable defined as consecutive stable_len steps of:
-            d<=thresh AND |vn_smooth|<=vn_eps
+      - search starts only after min_start
+      - first_contact: first t>=min_start with d(t) <= thresh
+      - stable: stable_len consecutive steps of (d<=thresh AND |vn_smooth|<=vn_eps),
         searched after max(min_start, first_contact + min_after_contact)
     """
-
     T = int(d.shape[0])
     if T == 0:
         return -1, -1
 
     start0 = min(T, max(0, min_start))
 
-    # ---- HARD require_contact (after start0 only) ----
     cc = np.where(d[start0:] <= contact_d_thresh)[0]
     if cc.size == 0:
         return -1, -1
     first_contact = start0 + int(cc[0])
 
-    # ---- HARD require_stable (after max(start0, first_contact + min_after_contact)) ----
     stable_mask = (d <= contact_d_thresh) & (np.abs(vn_smooth) <= vn_eps)
-
     start = min(T, max(start0, first_contact + max(0, int(min_after_contact))))
     stable_mask[:start] = False
 
@@ -232,7 +228,7 @@ def build_local_frame_from_demo(
     wall_normal: np.ndarray,
     plane_offset: float,
     contact_window: int,
-    dist_eps: float,  # still used as contact_d_thresh (tolerance)
+    dist_eps: float,
     vn_eps: float,
     stable_len: int,
     min_after_contact: int,
@@ -240,20 +236,8 @@ def build_local_frame_from_demo(
     min_start: int,
 ) -> tuple[np.ndarray, np.ndarray, int, int, int, np.ndarray, np.ndarray, np.ndarray]:
     """
-    HARD behavior:
-      - require_contact = ON  (need d <= dist_eps)
-      - require_stable  = ON  (need stable window; else chosen=-1 and frame is dummy)
-
-    Contact threshold:
-      d <= dist_eps  (NOTE: dist_eps is now "contact tolerance" not "|d|<=...")
-
-    Axes:
-      z = wall normal (from wall_quat)
-      y = progression direction in stable window, projected to plane
-      x = y × z (right-handed), then re-orthogonalize y = z × x
-
-    Origin:
-      origin = pos[chosen_idx]  (chosen_idx == stable_idx)
+    Returns:
+      origin, R_local_to_base, chosen_idx, stable_idx, first_contact, d, vn_raw, vn_smooth
     """
     z = unit(wall_normal)
 
@@ -270,7 +254,6 @@ def build_local_frame_from_demo(
         min_start=min_start,
     )
 
-    # HARD require_stable
     if stable_idx < 0:
         # dummy frame (keeps pipeline alive, but chosen stays -1)
         origin = pos[0].copy()
@@ -286,30 +269,25 @@ def build_local_frame_from_demo(
     chosen_idx = stable_idx
     origin = pos[chosen_idx].copy()
 
-    # Y axis from stable window
+    # Y axis from stable window (you hard-coded 100 in your version; keep behavior)
     y = stable_window_direction(pos, z, stable_idx=chosen_idx, stable_len=100, use_mean_diffs=True)
 
     if np.linalg.norm(y) < 1e-9:
-        # fallback: short lookahead
         i1 = min(chosen_idx + contact_window, pos.shape[0] - 1)
         y = unit(project_to_plane(pos[i1] - pos[chosen_idx], z))
 
     if np.linalg.norm(y) < 1e-9:
-        # last resort: arbitrary in-plane direction
         tmp = np.array([0.0, 1.0, 0.0], dtype=np.float64)
         if abs(np.dot(tmp, z)) > 0.9:
             tmp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         y = unit(project_to_plane(tmp, z))
 
-    # X axis (right-handed)
     x = unit(np.cross(y, z))
     if np.linalg.norm(x) < 1e-9:
         tmp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         x = unit(np.cross(tmp, z))
 
-    # re-orthogonalize y
     y = unit(np.cross(z, x))
-
     R_l2b = np.column_stack([x, y, z])
     return origin, R_l2b, chosen_idx, stable_idx, first_c, d, vn_raw, vn_smooth
 
@@ -331,38 +309,30 @@ def transform_demo_to_local(
 
 
 # ----------------------------
-# NEW: exact contact segment from z_local
+# contact segment from z_local (sign-crossing)
 # ----------------------------
-def find_contact_segment_from_zlocal_exact(
-    z_local: np.ndarray,
-    chosen_idx: int,
-) -> tuple[int, int]:
+def find_contact_segment_from_zlocal_exact(z_local: np.ndarray, chosen_idx: int) -> tuple[int, int]:
     """
-    Contact segment by sign-crossing rule (NO dist_eps):
-      - start = chosen_idx
-      - end   = last index t >= chosen_idx such that z[t] <= 0 and z[t+1] > 0
-        (i.e., last departure from non-positive to positive)
-    If such crossing does not exist, end = last index (T-1).
+    start = chosen_idx
+    end   = last t >= chosen_idx s.t. z[t] <= 0 and z[t+1] > 0  (leaves plane)
+    If no crossing found, end = T-1.
     """
     z = np.asarray(z_local, dtype=np.float64).reshape(-1)
     T = int(z.shape[0])
     if chosen_idx < 0 or chosen_idx >= T:
         return -1, -1
-
     if T < 2:
         return chosen_idx, chosen_idx
 
-    # Look for crossings within [chosen_idx .. T-2]
     a = chosen_idx
-    b = T - 1  # last valid t for checking t+1 is T-2
-    z0 = z[a:b]       # up to T-2
-    z1 = z[a+1:T]     # from chosen+1 to T-1
+    z0 = z[a : T - 1]
+    z1 = z[a + 1 : T]
 
     cross = np.where((z0 <= 0.0) & (z1 > 0.0))[0]
     if cross.size == 0:
         return chosen_idx, T - 1
 
-    last_t = a + int(cross[-1])  # this 't' is the step where it leaves (<=0 -> >0)
+    last_t = a + int(cross[-1])
     return chosen_idx, last_t
 
 
@@ -376,7 +346,7 @@ def main():
     ap.add_argument("--wall_quat", type=float, nargs=4, default=[0.5, -0.5, -0.5, 0.5])
 
     # thresholds
-    ap.add_argument("--dist_eps", type=float, default=0.003, help="Contact tolerance for d(t): require d(t) <= dist_eps (m).")
+    ap.add_argument("--dist_eps", type=float, default=0.003, help="Contact tolerance: require d(t) <= dist_eps (m).")
     ap.add_argument("--vn_eps", type=float, default=0.0004, help="Normal velocity stability threshold (m/step).")
     ap.add_argument("--stable_len", type=int, default=20, help="Consecutive steps for stability.")
     ap.add_argument("--min_after_contact", type=int, default=0, help="Start stable search after first_contact + this.")
@@ -384,12 +354,12 @@ def main():
     ap.add_argument("--min_start", type=int, default=30, help="Minimum start index (hard constraint).")
     ap.add_argument("--contact_window", type=int, default=10)
 
-    ap.add_argument("--crop_pad", type=int, default=10, help="Pad length added before chosen_idx and after last_contact (steps).")
+    ap.add_argument("--crop_pad", type=int, default=20, help="Pad length added before chosen_idx and after last_contact (steps).")
 
     # plotting
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--plot_demo_indices", type=int, nargs="*", default=[0, 4, 8, 12, 208])
-    ap.add_argument("--img_dir", default="/home/sungboo/rb10_control/images/demo_20260122")
+    ap.add_argument("--img_dir", default="/home/sungboo/rb10_control/images/demo_20260122/preprocessing")
     args = ap.parse_args()
 
     in_path = Path(args.in_npz)
@@ -407,6 +377,12 @@ def main():
     D = ptr.shape[0] - 1
     names = dnpz["demo_names"] if "demo_names" in dnpz else np.array([f"demo_{i}" for i in range(D)], dtype=object)
 
+    # Optional per-step labels
+    has_skill = "skill_id" in dnpz
+    has_t = "t" in dnpz
+    skill_full = dnpz["skill_id"] if has_skill else None
+    t_full = dnpz["t"] if has_t else None
+
     # wall normal in base: R * +Z
     R_w = R_from_q(np.array(args.wall_quat, dtype=np.float64))
     wall_normal = unit(R_w @ np.array([0.0, 0.0, 1.0], dtype=np.float64))
@@ -420,22 +396,24 @@ def main():
     stable_index = np.full((D,), -1, dtype=np.int32)
     first_contact_index = np.full((D,), -1, dtype=np.int32)
 
-    # NEW: cropped buffers (per-demo)
-    X_crop_list = []
-    Xlocal_crop_list = []
-    demo_names_crop = []
+    # Cropped buffers (per-demo)
+    X_crop_list: list[np.ndarray] = []
+    Xlocal_crop_list: list[np.ndarray] = []
+    skill_crop_list: list[np.ndarray] = []
+    t_crop_list: list[np.ndarray] = []
+
+    demo_names_crop: list[object] = []
     demo_ptr_crop = [0]
 
-    kept_orig_demo_index = []
-    crop_s_list = []
-    crop_e_list = []
-    contact_start_list = []
-    contact_end_list = []
-    chosen_new_list = []
-    stable_new_list = []
-    first_contact_new_list = []
+    kept_orig_demo_index: list[int] = []
+    crop_s_list: list[int] = []
+    crop_e_list: list[int] = []
+    contact_start_list: list[int] = []
+    contact_end_list: list[int] = []
+    chosen_new_list: list[int] = []
+    stable_new_list: list[int] = []
+    first_contact_new_list: list[int] = []
 
-    # debug series for plotting
     debug_series = {}
     plot_set = set(args.plot_demo_indices)
 
@@ -443,6 +421,10 @@ def main():
         s, e = int(ptr[i]), int(ptr[i + 1])
         pos = X[s:e, 0:3].astype(np.float64)
         quat = X[s:e, 3:7].astype(np.float64)
+
+        # init so debug_series never hits unbound locals
+        c_start = c_end = -1
+        crop_s = crop_e = -1
 
         origin, R_l2b, chosen_idx, stable_idx, first_c, d_series, vn_raw, vn_smooth = build_local_frame_from_demo(
             pos=pos,
@@ -456,16 +438,16 @@ def main():
             vn_smooth_win=args.vn_smooth_win,
             min_start=args.min_start,
         )
-        
+
         pos_l, quat_l = transform_demo_to_local(pos, quat, origin, R_l2b)
 
         # enforce z_local(chosen) == 0 when chosen exists
         if chosen_idx >= 0:
             z0 = float(pos_l[chosen_idx, 2])
             pos_l[:, 2] -= z0
-            pos_l[chosen_idx, 2] = 0.0  # hard set to exact zero
+            pos_l[chosen_idx, 2] = 0.0
 
-        # fill full-length outputs (even if chosen==-1, keep the transformed values)
+        # fill full-length outputs
         X_local[s:e, 0:3] = pos_l.astype(np.float32)
         X_local[s:e, 3:7] = quat_l.astype(np.float32)
 
@@ -475,23 +457,16 @@ def main():
         stable_index[i] = stable_idx
         first_contact_index[i] = first_c
 
-        # --------------------------
-        # NEW: crop around contact segment (only if chosen exists)
-        # --------------------------
+        # crop around contact segment (only if chosen exists)
         if chosen_idx >= 0:
             zloc = pos_l[:, 2].astype(np.float64)
-
-            c_start, c_end = find_contact_segment_from_zlocal_exact(
-                z_local=zloc,
-                chosen_idx=chosen_idx,
-            )
+            c_start, c_end = find_contact_segment_from_zlocal_exact(z_local=zloc, chosen_idx=chosen_idx)
 
             if c_start >= 0 and c_end >= 0:
                 pad = max(0, int(args.crop_pad))
                 crop_s = max(0, c_start - pad)
                 crop_e = min(zloc.shape[0], c_end + pad + 1)  # exclusive
 
-                # Build per-demo arrays
                 X_demo = X[s:e].astype(np.float32)
                 Xl_demo = np.zeros_like(X_demo, dtype=np.float32)
                 Xl_demo[:, 0:3] = pos_l.astype(np.float32)
@@ -500,14 +475,20 @@ def main():
                 Xc = X_demo[crop_s:crop_e]
                 Xlc = Xl_demo[crop_s:crop_e]
 
-                # Indices inside cropped demo
+                # crop labels (optional) -> but we WILL save skill_id_crop / t_crop if present
+                if has_skill:
+                    sc = np.asarray(skill_full[s:e])[crop_s:crop_e]
+                    skill_crop_list.append(sc.astype(skill_full.dtype, copy=False))
+                if has_t:
+                    tc = np.asarray(t_full[s:e])[crop_s:crop_e]
+                    t_crop_list.append(tc.astype(t_full.dtype, copy=False))
+
                 chosen_new = chosen_idx - crop_s
                 stable_new = stable_idx - crop_s if stable_idx >= 0 else -1
                 first_new = first_c - crop_s if first_c >= 0 else -1
                 c_start_new = c_start - crop_s
                 c_end_new = c_end - crop_s
 
-                # Append
                 X_crop_list.append(Xc)
                 Xlocal_crop_list.append(Xlc)
                 demo_names_crop.append(names[i])
@@ -523,7 +504,6 @@ def main():
 
                 demo_ptr_crop.append(demo_ptr_crop[-1] + Xc.shape[0])
 
-        # plotting debug (use full demo local z)
         if i in plot_set:
             debug_series[i] = {
                 "d": d_series.astype(np.float32),
@@ -534,17 +514,15 @@ def main():
                 "stable_idx": int(stable_idx),
                 "first_contact": int(first_c),
                 "name": str(names[i]),
-                "ci": int(chosen_idx),               
                 "c_start": int(c_start),
-                "c_end": int(c_end),        
-                "crop_s": int(crop_s),                
-                "crop_e": int(crop_e),              
+                "c_end": int(c_end),
+                "crop_s": int(crop_s),
+                "crop_e": int(crop_e),
             }
 
     # save npz
     out = {k: dnpz[k] for k in dnpz.files}
 
-    # full outputs
     out["X_local"] = X_local
     out["frame_origin"] = frame_origin
     out["frame_R_local_to_base"] = frame_R
@@ -563,20 +541,29 @@ def main():
     out["vn_smooth_win"] = np.array([args.vn_smooth_win], dtype=np.int32)
     out["crop_pad"] = np.array([args.crop_pad], dtype=np.int32)
 
-    # --------------------------
-    # NEW: finalize cropped arrays
-    # --------------------------
+    # finalize cropped arrays
     if len(X_crop_list) == 0:
         print("[warn] No demos kept for cropped output (no chosen/stable found).")
         X_crop = np.zeros((0, X.shape[1]), dtype=np.float32)
         X_local_crop = np.zeros((0, X.shape[1]), dtype=np.float32)
         demo_ptr_crop_arr = np.array([0], dtype=np.int64)
         demo_names_crop_arr = np.array([], dtype=object)
+
+        # still create empty label arrays if originals exist
+        if has_skill:
+            out["skill_id_crop"] = np.zeros((0,), dtype=skill_full.dtype)
+        if has_t:
+            out["t_crop"] = np.zeros((0,), dtype=t_full.dtype)
     else:
         X_crop = np.concatenate(X_crop_list, axis=0).astype(np.float32)
         X_local_crop = np.concatenate(Xlocal_crop_list, axis=0).astype(np.float32)
         demo_ptr_crop_arr = np.array(demo_ptr_crop, dtype=np.int64)
         demo_names_crop_arr = np.array(demo_names_crop, dtype=object)
+
+        if has_skill:
+            out["skill_id_crop"] = np.concatenate(skill_crop_list, axis=0).astype(skill_full.dtype, copy=False)
+        if has_t:
+            out["t_crop"] = np.concatenate(t_crop_list, axis=0).astype(t_full.dtype, copy=False)
 
     out["X_crop"] = X_crop
     out["X_local_crop"] = X_local_crop
@@ -593,20 +580,20 @@ def main():
     out["first_contact_index_crop"] = np.array(first_contact_new_list, dtype=np.int32)
 
     out["contact_def"] = np.array(
-        ["contact segment := [chosen_idx .. last idx where z_local == 0] (exact equality), then padded by crop_pad"],
-        dtype=object
+        ["contact segment := [chosen_idx .. last idx where z_local <=0 then leaves to >0] (sign-crossing), then padded by crop_pad"],
+        dtype=object,
     )
 
     np.savez_compressed(out_path, **out)
 
-    # --------------------------
     # plots (optional)
-    # --------------------------
     if args.plot:
         import matplotlib.pyplot as plt
 
         def _set_axes_equal(ax):
-            x_limits = ax.get_xlim3d(); y_limits = ax.get_ylim3d(); z_limits = ax.get_zlim3d()
+            x_limits = ax.get_xlim3d()
+            y_limits = ax.get_ylim3d()
+            z_limits = ax.get_zlim3d()
             x_range = abs(x_limits[1] - x_limits[0]); x_mid = np.mean(x_limits)
             y_range = abs(y_limits[1] - y_limits[0]); y_mid = np.mean(y_limits)
             z_range = abs(z_limits[1] - z_limits[0]); z_mid = np.mean(z_limits)
@@ -616,10 +603,6 @@ def main():
             ax.set_zlim3d([z_mid - r, z_mid + r])
 
         def _draw_frame(ax, origin_b, R_l2b, L=0.05):
-            """
-            Draw local axes in BASE coords.
-            R_l2b columns are local unit axes expressed in base frame.
-            """
             o = origin_b.reshape(3,)
             ex = R_l2b[:, 0]; ey = R_l2b[:, 1]; ez = R_l2b[:, 2]
             x = o + L * ex
@@ -648,7 +631,6 @@ def main():
             si = int(stable_index[i])
             fc = int(first_contact_index[i])
 
-            # BASE view
             fig = plt.figure(figsize=(10, 8))
             ax = fig.add_subplot(111, projection="3d")
             ax.plot(pos_b[:, 0], pos_b[:, 1], pos_b[:, 2])
@@ -669,7 +651,6 @@ def main():
             plt.savefig(str(img_dir / f"demo_{i:03d}_3d_base.png"))
             plt.close(fig)
 
-            # LOCAL view
             fig = plt.figure(figsize=(10, 8))
             ax = fig.add_subplot(111, projection="3d")
             ax.plot(pos_l[:, 0], pos_l[:, 1], pos_l[:, 2])
@@ -688,7 +669,6 @@ def main():
             plt.savefig(str(img_dir / f"demo_{i:03d}_3d_local.png"))
             plt.close(fig)
 
-        # d / vn / z plots
         for i in args.plot_demo_indices:
             if i not in debug_series:
                 continue
@@ -702,13 +682,11 @@ def main():
             T = d_series.shape[0]
             tt = np.arange(T)
 
-            fc = ds["first_contact"]
-            si = ds["stable_idx"]
-            ci = ds["chosen_idx"]
-
-            ci = int(ds.get("ci", ds.get("chosen_idx", -1)))  # chosen
+            fc = int(ds["first_contact"])
+            si = int(ds["stable_idx"])
+            ci = int(ds["chosen_idx"])
             crop_s = int(ds.get("crop_s", -1))
-            crop_e = int(ds.get("crop_e", -1))  # exclusive
+            crop_e = int(ds.get("crop_e", -1))
             c_end = int(ds.get("c_end", -1))
 
             plt.figure(figsize=(11, 9))
@@ -717,10 +695,6 @@ def main():
             ax1.plot(tt, d_series)
             ax1.axhline(args.dist_eps, linestyle=":")
             ax1.axhline(0.0, linestyle="--")
-            # if fc >= 0:
-            #     ax1.axvline(fc, linestyle="--")
-            # if si >= 0:
-            #     ax1.axvline(si, linestyle="-")
             ax1.set_ylabel("d(t) [m]  (need d<=dist_eps)")
 
             ax2 = plt.subplot(3, 1, 2, sharex=ax1)
@@ -729,20 +703,12 @@ def main():
             ax2.axhline(+args.vn_eps, linestyle=":")
             ax2.axhline(-args.vn_eps, linestyle=":")
             ax2.axhline(0.0, linestyle="--")
-            # if fc >= 0:
-            #     ax2.axvline(fc, linestyle="--")
-            # if si >= 0:
-            #     ax2.axvline(si, linestyle="-")
             ax2.set_ylabel("v_n [m/step]")
             ax2.legend(loc="upper right")
 
             ax3 = plt.subplot(3, 1, 3, sharex=ax1)
             ax3.plot(tt, zloc)
             ax3.axhline(0.0, linestyle="--")
-            # if fc >= 0:
-            #     ax3.axvline(fc, linestyle="--")
-            # if si >= 0:
-            #     ax3.axvline(si, linestyle="-")
             ax3.set_xlabel("t [step]")
             ax3.set_ylabel("z_local(t) [m]")
 
@@ -751,19 +717,16 @@ def main():
                 ax2.axvline(ci, linestyle="-")
                 ax3.axvline(ci, linestyle="-")
 
-            # crop start
             if crop_s >= 0:
                 ax1.axvline(crop_s, linestyle=":")
                 ax2.axvline(crop_s, linestyle=":")
                 ax3.axvline(crop_s, linestyle=":")
 
-            # crop end (exclusive -> inclusive로 보이게 crop_e-1)
             if crop_e >= 1:
                 ax1.axvline(crop_e - 1, linestyle=":")
                 ax2.axvline(crop_e - 1, linestyle=":")
                 ax3.axvline(crop_e - 1, linestyle=":")
 
-            # contact end
             if c_end >= 0:
                 ax1.axvline(c_end, linestyle="-")
                 ax2.axvline(c_end, linestyle="-")
@@ -788,6 +751,10 @@ def main():
     print(f"  cropped_kept:  {n_kept}/{D}   (chosen demos only)")
     if n_kept > 0:
         print(f"  cropped total steps: {int(out['demo_ptr_crop'][-1])}")
+        if has_skill:
+            print(f"  skill_id_crop saved: shape={out['skill_id_crop'].shape}, dtype={out['skill_id_crop'].dtype}")
+        if has_t:
+            print(f"  t_crop saved:       shape={out['t_crop'].shape}, dtype={out['t_crop'].dtype}")
     print(f"  wall_normal(base): {wall_normal}")
     if args.plot:
         print(f"  figures: {img_dir}/demo_XXX_d_vnraw_vnsm_zlocal.png")
