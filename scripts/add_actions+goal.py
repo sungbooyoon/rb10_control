@@ -221,30 +221,68 @@ def seam_id_for_demo(demo_name: str) -> int:
     idx = int(demo_name[5:])
     return (idx // 4) % 18 + 1
 
+def write_goal_into_obs(demo_g: h5py.Group, T: int, seam_id: int, overwrite: bool = True):
+    """
+    Write seam_* into /data/demo_x/obs/ so robomimic can treat them as obs keys.
+    Shapes: (T,3), (T,6), (T,1)
+    """
+    if "obs" not in demo_g:
+        raise KeyError("demo group has no 'obs'")
 
-def write_goal_group(g: h5py.Group, T: int, seam_id: int, overwrite: bool = True):
+    origin_xyz, quat_xyzw = SEAMS[seam_id]
+    origin = np.array(origin_xyz, dtype=np.float32)
+    q = np.array(quat_xyzw, dtype=np.float32)
+    seam_rot6d = quat_xyzw_to_rot6d(q[None, :]).astype(np.float32)[0]
+    seam_length = np.array([SEAM_LENGTH_CONST], dtype=np.float32)
+
+    origin_T = np.repeat(origin[None, :], T, axis=0)
+    rot6d_T  = np.repeat(seam_rot6d[None, :], T, axis=0)
+    len_T    = np.repeat(seam_length[None, :], T, axis=0)
+
+    obs = demo_g["obs"]
+
+    def _write(name: str, arr: np.ndarray):
+        if name in obs:
+            if overwrite:
+                del obs[name]
+            else:
+                return
+        obs.create_dataset(
+            name, data=arr,
+            compression="gzip", compression_opts=4,
+            shuffle=True, chunks=True,
+        )
+
+    _write("seam_origin", origin_T)
+    _write("seam_rot6d", rot6d_T)
+    _write("seam_length", len_T)
+
+
+def write_goal_group(demo_g: h5py.Group, T: int, seam_id: int, overwrite: bool = True):
     """
     Create (or overwrite) /data/demo_x/goal/{seam_origin,seam_rot6d,seam_length}
     with shapes (T,3), (T,6), (T,1)
+
+    NOTE: goal is a sibling of 'obs' under each demo group (robomimic-friendly).
     """
+    # ---- safety: ensure we're at demo level ----
+    if "obs" not in demo_g:
+        raise KeyError("write_goal_group expects demo group containing 'obs'")
+
     if seam_id not in SEAMS:
         raise KeyError(f"Unknown seam_id={seam_id}")
 
     origin_xyz, quat_xyzw = SEAMS[seam_id]
-    origin = np.array(origin_xyz, dtype=np.float32)  # (3,)
-    q = np.array(quat_xyzw, dtype=np.float32)       # (4,)
-    seam_rot6d = quat_xyzw_to_rot6d(q[None, :]).astype(np.float32)[0]  # (6,)
-    seam_length = np.array([SEAM_LENGTH_CONST], dtype=np.float32)      # (1,)
+    origin = np.array(origin_xyz, dtype=np.float32)
+    q = np.array(quat_xyzw, dtype=np.float32)
+    seam_rot6d = quat_xyzw_to_rot6d(q[None, :]).astype(np.float32)[0]
+    seam_length = np.array([SEAM_LENGTH_CONST], dtype=np.float32)
 
-    # repeat for T timesteps
-    origin_T = np.repeat(origin[None, :], T, axis=0)           # (T,3)
-    rot6d_T = np.repeat(seam_rot6d[None, :], T, axis=0)        # (T,6)
-    length_T = np.repeat(seam_length[None, :], T, axis=0)      # (T,1)
+    origin_T = np.repeat(origin[None, :], T, axis=0)
+    rot6d_T = np.repeat(seam_rot6d[None, :], T, axis=0)
+    length_T = np.repeat(seam_length[None, :], T, axis=0)
 
-    if "goal" not in g:
-        goal = g.create_group("goal")
-    else:
-        goal = g["goal"]
+    goal = demo_g.require_group("goal")
 
     def _write(name: str, arr: np.ndarray):
         if name in goal:
@@ -253,12 +291,9 @@ def write_goal_group(g: h5py.Group, T: int, seam_id: int, overwrite: bool = True
             else:
                 return False
         goal.create_dataset(
-            name,
-            data=arr,
-            compression="gzip",
-            compression_opts=4,
-            shuffle=True,
-            chunks=True,
+            name, data=arr,
+            compression="gzip", compression_opts=4,
+            shuffle=True, chunks=True,
         )
         return True
 
@@ -343,7 +378,9 @@ def main():
             # ---- goal (repeat across T)
             T = int(pos.shape[0])
             seam_id = seam_id_for_demo(dk)
-            write_goal_group(g, T=T, seam_id=seam_id, overwrite=args.overwrite)
+
+            write_goal_group(g, T=T, seam_id=seam_id, overwrite=args.overwrite)   # /goal 아래
+            write_goal_into_obs(g, T=T, seam_id=seam_id, overwrite=args.overwrite) # /obs 아래
 
             # num_samples 맞추기(선택)
             try:
