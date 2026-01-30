@@ -91,18 +91,19 @@ python3 /home/sungboo/rb10_control/scripts/fix_demo_index.py \
 
 python3 /home/sungboo/rb10_control/scripts/add_actions+goal.py \
   --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224_new.hdf5 \
-  --out /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 \
+  --out /home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5 \
   --overwrite
 
-python3 /home/sungboo/rb10_control/scripts/export_ee_npz.py --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 --out /home/sungboo/rb10_control/dataset/demo_20260122.npz
+python3 /home/sungboo/rb10_control/scripts/export_ee_npz.py --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5 \
+  --out /home/sungboo/rb10_control/dataset/demo_20260122.npz
 
 ## Dataset 정보 확인
 python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
-  --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 \
+  --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5 \
   --out-dir /home/sungboo/rb10_control/images/demo_20260122/
 
 python3 /home/sungboo/rb10_control/robomimic/robomimic/scripts/get_dataset_info.py \
-  --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 \
+  --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5 \
   --verbose
 
 ## (Run Once) Tag 위치 추출

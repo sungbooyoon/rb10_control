@@ -33,6 +33,14 @@ def main():
         remove_key = f"demo_{remove_id}"
 
         # -------------------------
+        # STEP 0: guard (only run if demo_216 exists)
+        # -------------------------
+        if "demo_216" not in data:
+            print("[skip] demo_216 not found. "
+                "Assuming file already processed or original demo count < 217.")
+            return
+
+        # -------------------------
         # STEP 1: delete demo_180
         # -------------------------
         if remove_key in data:
