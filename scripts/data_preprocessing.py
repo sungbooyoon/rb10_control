@@ -157,6 +157,7 @@ def find_contact_and_stable_index(
     vn_eps: float,
     stable_len: int,
     min_after_contact: int,
+    contact_sign: str,
 ) -> tuple[int, int, np.ndarray, np.ndarray]:
     """
     Returns:
@@ -164,7 +165,12 @@ def find_contact_and_stable_index(
     """
     d = pos @ n - plane_offset  # (T,)
 
-    cc = np.where(d <= 0.0)[0]
+    if contact_sign == "le":
+        contact_mask = (d <= 0.0)
+    else:
+        contact_mask = (d >= 0.0)
+
+    cc = np.where(contact_mask)[0]
     if cc.size == 0:
         # no contact half-space
         vn = np.zeros((pos.shape[0],), dtype=np.float64)
@@ -194,6 +200,7 @@ def build_local_frame_from_demo(
     vn_eps: float,
     stable_len: int,
     min_after_contact: int,
+    contact_sign: str,
 ) -> tuple[np.ndarray, np.ndarray, int, int, np.ndarray, np.ndarray]:
     """
     Returns:
@@ -211,6 +218,7 @@ def build_local_frame_from_demo(
         vn_eps=vn_eps,
         stable_len=stable_len,
         min_after_contact=min_after_contact,
+        contact_sign=contact_sign,
     )
 
     if first_contact < 0:
@@ -290,6 +298,10 @@ def main():
     ap.add_argument("--plane_offset", type=float, default=-0.779)
     ap.add_argument("--wall_quat", type=float, nargs=4, default=[0.5, -0.5, -0.5, 0.5])  # xyzw
 
+    # contact side convention
+    ap.add_argument("--contact_sign", choices=["le", "ge"], default="le",
+                    help="Contact side half-space. le: d<=0 is contact side, ge: d>=0 is contact side.")
+
     # stability params
     ap.add_argument("--dist_eps", type=float, default=0.003, help="|d| <= dist_eps (m), default 3mm")
     ap.add_argument("--vn_eps", type=float, default=0.001, help="|v_n| <= vn_eps (m/step)")
@@ -346,7 +358,8 @@ def main():
             dist_eps=args.dist_eps,
             vn_eps=args.vn_eps,
             stable_len=args.stable_len,
-            min_after_contact=args.min_after_contact
+            min_after_contact=args.min_after_contact,
+            contact_sign=args.contact_sign,
         )
 
         pos_l, quat_l = transform_demo_to_local(pos, quat, origin, R_l2b)
@@ -379,6 +392,7 @@ def main():
     out["wall_normal_base"] = wall_normal
     out["plane_offset"] = np.array([args.plane_offset], dtype=np.float64)
     out["wall_quat_xyzw"] = np.array(args.wall_quat, dtype=np.float64)
+    out["contact_sign"] = np.array([args.contact_sign], dtype=object)
 
     np.savez_compressed(out_path, **out)
 
@@ -444,7 +458,7 @@ def main():
     n_stable = int(np.sum(contact_index >= 0))
     print(f"[saved] {out_path}")
     print(f"  demos: {D}")
-    print(f"  contact_side_found: {n_contact_side}/{D}")
+    print(f"  contact_side_found: {n_contact_side}/{D}  (contact_sign={args.contact_sign})")
     print(f"  chosen_found: {n_stable}/{D}  (stable window if possible; else fallback to first_contact)")
     print(f"  wall_normal(base): {wall_normal}")
     print(f"  figures: {img_dir}/demo_XXX_d_vn_zlocal.png")
