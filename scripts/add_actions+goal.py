@@ -2,15 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-Add actions (9D) to a robomimic-style HDF5 by computing EE pose deltas from obs:
+Add actions (9D) + goal (seam_origin, seam_rot6d, seam_length) to a robomimic-style HDF5.
+
+Actions:
 - Δpos (3): pos[t+1] - pos[t]
 - rot6d (6): first two columns of R_rel, where R_rel = R(q[t])^T * R(q[t+1])
 Actions are stored with length T (same as obs); last action is zeros.
 
+Goal (per timestep, repeated across T):
+- seam_origin: (3,)
+- seam_rot6d: (6,) from provided seam quaternion xyzw
+- seam_length: (1,) constant 0.3
+
+Seam assignment by demo index i:
+- seam_id = (i // 4) % 18 + 1
+
 Example:
-  python add_actions_from_ee_obs_rot6d.py \
+  python add_actions_and_goal.py \
     --hdf5 /path/to/demo_20260122.hdf5 \
-    --out  /path/to/demo_20260122_with_actions.hdf5 \
+    --out  /path/to/demo_20260122_actions_goal.hdf5 \
     --overwrite
 """
 
@@ -22,6 +32,10 @@ import shutil
 import h5py
 import numpy as np
 
+
+# -------------------------
+# Quaternion / Rotation utils
+# -------------------------
 
 def q_normalize(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
@@ -62,7 +76,6 @@ def quat_xyzw_to_R(q_xyzw: np.ndarray) -> np.ndarray:
     yw = y * w
     zw = z * w
 
-    # Standard quaternion->R (right-handed) for xyzw
     R = np.empty(q.shape[:-1] + (3, 3), dtype=np.float64)
     R[..., 0, 0] = ww + xx - yy - zz
     R[..., 0, 1] = 2 * (xy - zw)
@@ -81,12 +94,25 @@ def quat_xyzw_to_R(q_xyzw: np.ndarray) -> np.ndarray:
 def rotmat_to_rot6d(R: np.ndarray) -> np.ndarray:
     """
     R: (..., 3, 3)
-    return: (..., 6) = [R[:,0], R[:,1]] (column-major concat of first 2 cols)
+    return: (..., 6) = [R[:,0], R[:,1]] (concat first 2 columns)
     """
     c1 = R[..., :, 0]  # (..., 3)
     c2 = R[..., :, 1]  # (..., 3)
     return np.concatenate([c1, c2], axis=-1)
 
+
+def quat_xyzw_to_rot6d(q_xyzw: np.ndarray) -> np.ndarray:
+    """
+    q_xyzw: (...,4) xyzw
+    returns rot6d: (...,6)
+    """
+    R = quat_xyzw_to_R(q_xyzw)
+    return rotmat_to_rot6d(R)
+
+
+# -------------------------
+# Action computation
+# -------------------------
 
 def compute_actions_rot6d(pos: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
     """
@@ -111,7 +137,6 @@ def compute_actions_rot6d(pos: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
     dpos = pos[1:] - pos[:-1]  # (T-1,3)
 
     R = quat_xyzw_to_R(q)  # (T,3,3)
-    # R_rel[t] = R[t]^T * R[t+1]
     R_rel = np.matmul(np.transpose(R[:-1], (0, 2, 1)), R[1:])  # (T-1,3,3)
     rot6d = rotmat_to_rot6d(R_rel)  # (T-1,6)
 
@@ -121,6 +146,97 @@ def compute_actions_rot6d(pos: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
     return actions
 
 
+# -------------------------
+# Seam spec + assignment
+# -------------------------
+
+SEAM_LENGTH_CONST = 0.3  # meters
+
+# seam_id -> (origin_xyz, quat_xyzw)
+SEAMS = {
+    1:  ((0.779, -0.390, 1.136), (0.5, -0.5, -0.5, 0.5)),
+    2:  ((0.779, -0.390, 0.836), (0.5, -0.5, -0.5, 0.5)),
+    3:  ((0.779, -0.390, 0.536), (0.5, -0.5, -0.5, 0.5)),
+    4:  ((0.779, -0.090, 1.136), (0.5, -0.5, -0.5, 0.5)),
+    5:  ((0.779, -0.090, 0.836), (0.5, -0.5, -0.5, 0.5)),
+    6:  ((0.779, -0.090, 0.536), (0.5, -0.5, -0.5, 0.5)),
+    7:  ((0.779,  0.210, 1.136), (0.5, -0.5, -0.5, 0.5)),
+    8:  ((0.779,  0.210, 0.836), (0.5, -0.5, -0.5, 0.5)),
+    9:  ((0.779,  0.210, 0.536), (0.5, -0.5, -0.5, 0.5)),
+    10: ((0.779, -0.390, 0.836), (0.5, -0.5, -0.5, 0.5)),
+    11: ((0.779, -0.390, 0.536), (0.5, -0.5, -0.5, 0.5)),
+    12: ((0.779, -0.390, 0.236), (0.5, -0.5, -0.5, 0.5)),
+    13: ((0.779, -0.090, 0.836), (0.5, -0.5, -0.5, 0.5)),
+    14: ((0.779, -0.090, 0.536), (0.5, -0.5, -0.5, 0.5)),
+    15: ((0.779, -0.090, 0.236), (0.5, -0.5, -0.5, 0.5)),
+    16: ((0.779,  0.210, 0.836), (0.5, -0.5, -0.5, 0.5)),
+    17: ((0.779,  0.210, 0.536), (0.5, -0.5, -0.5, 0.5)),
+    18: ((0.779,  0.210, 0.236), (0.5, -0.5, -0.5, 0.5)),
+}
+
+
+def seam_id_for_demo(demo_name: str) -> int:
+    """
+    demo_0..demo_3 -> seam 1
+    demo_4..demo_7 -> seam 2
+    ...
+    seam 18 then wraps back to seam 1
+    """
+    if not demo_name.startswith("demo_"):
+        raise ValueError(f"Unexpected demo name: {demo_name}")
+    idx = int(demo_name[5:])
+    return (idx // 4) % 18 + 1
+
+
+def write_goal_group(g: h5py.Group, T: int, seam_id: int, overwrite: bool = True):
+    """
+    Create (or overwrite) /data/demo_x/goal/{seam_origin,seam_rot6d,seam_length}
+    with shapes (T,3), (T,6), (T,1)
+    """
+    if seam_id not in SEAMS:
+        raise KeyError(f"Unknown seam_id={seam_id}")
+
+    origin_xyz, quat_xyzw = SEAMS[seam_id]
+    origin = np.array(origin_xyz, dtype=np.float32)  # (3,)
+    q = np.array(quat_xyzw, dtype=np.float32)       # (4,)
+    seam_rot6d = quat_xyzw_to_rot6d(q[None, :]).astype(np.float32)[0]  # (6,)
+    seam_length = np.array([SEAM_LENGTH_CONST], dtype=np.float32)      # (1,)
+
+    # repeat for T timesteps
+    origin_T = np.repeat(origin[None, :], T, axis=0)           # (T,3)
+    rot6d_T = np.repeat(seam_rot6d[None, :], T, axis=0)        # (T,6)
+    length_T = np.repeat(seam_length[None, :], T, axis=0)      # (T,1)
+
+    if "goal" not in g:
+        goal = g.create_group("goal")
+    else:
+        goal = g["goal"]
+
+    def _write(name: str, arr: np.ndarray):
+        if name in goal:
+            if overwrite:
+                del goal[name]
+            else:
+                return False
+        goal.create_dataset(
+            name,
+            data=arr,
+            compression="gzip",
+            compression_opts=4,
+            shuffle=True,
+            chunks=True,
+        )
+        return True
+
+    _write("seam_origin", origin_T)
+    _write("seam_rot6d", rot6d_T)
+    _write("seam_length", length_T)
+
+
+# -------------------------
+# Main
+# -------------------------
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hdf5", required=True, help="input hdf5 (e.g., demo_20260122.hdf5)")
@@ -128,7 +244,7 @@ def main():
     ap.add_argument("--pos-key", default="ee_pos", help="obs key for ee position")
     ap.add_argument("--quat-key", default="ee_quat", help="obs key for ee quaternion (xyzw)")
     ap.add_argument("--action-key", default="actions", help="dataset name for actions")
-    ap.add_argument("--overwrite", action="store_true", help="overwrite actions if already exist")
+    ap.add_argument("--overwrite", action="store_true", help="overwrite actions/goal if already exist")
     args = ap.parse_args()
 
     shutil.copy(args.hdf5, args.out)
@@ -164,31 +280,45 @@ def main():
             pos = obs[args.pos_key][...]
             quat = obs[args.quat_key][...]
 
+            # ---- actions (T,9)
             actions = compute_actions_rot6d(pos, quat)
 
             if args.action_key in g:
                 if not args.overwrite:
                     print(f"[keep] {dk}: '{args.action_key}' already exists (use --overwrite to replace)")
-                    n_skipped += 1
-                    continue
-                del g[args.action_key]
+                else:
+                    del g[args.action_key]
+                    g.create_dataset(
+                        args.action_key,
+                        data=actions,
+                        compression="gzip",
+                        compression_opts=4,
+                        shuffle=True,
+                        chunks=True,
+                    )
+            else:
+                g.create_dataset(
+                    args.action_key,
+                    data=actions,
+                    compression="gzip",
+                    compression_opts=4,
+                    shuffle=True,
+                    chunks=True,
+                )
 
-            g.create_dataset(
-                args.action_key,
-                data=actions,
-                compression="gzip",
-                compression_opts=4,
-                shuffle=True,
-                chunks=True,
-            )
-            # robomimic에서 보통 num_samples를 actions 길이로 맞추는 편이라, 있으면 갱신(선택)
+            # ---- goal (repeat across T)
+            T = int(pos.shape[0])
+            seam_id = seam_id_for_demo(dk)
+            write_goal_group(g, T=T, seam_id=seam_id, overwrite=args.overwrite)
+
+            # num_samples 맞추기(선택)
             try:
                 g.attrs["num_samples"] = int(actions.shape[0])
             except Exception:
                 pass
 
             n_written += 1
-            print(f"[ok] {dk}: wrote {args.action_key} shape={actions.shape}")
+            print(f"[ok] {dk}: actions {actions.shape} + goal(seam_{seam_id})")
 
         print(f"\nDone. written={n_written}, skipped={n_skipped}, out={args.out}")
 

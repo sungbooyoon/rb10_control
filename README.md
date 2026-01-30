@@ -89,7 +89,7 @@ python3 /home/sungboo/rb10_control/scripts/fix_demo_index.py \
   --out /home/sungboo/rb10_control/data/demo_20260122_224+224_new.hdf5 \
   --remove 180
 
-python3 /home/sungboo/rb10_control/scripts/add_actions_to_dataset.py \
+python3 /home/sungboo/rb10_control/scripts/add_actions+goal.py \
   --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224_new.hdf5 \
   --out /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 \
   --overwrite
@@ -124,3 +124,25 @@ python3 /home/sungboo/rb10_control/scripts/cluster_apriltag.py \
 # Robomimc training (Diffusion)
 python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py \
   --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
+
+Seam 1~9 세로 방향
+seam_1: 0.779, -0.390, 1.136, 0.5, -0.5, -0.5, 0.5
+seam_2: 0.779, -0.390, 0.836, 0.5, -0.5, -0.5, 0.5
+seam_3: 0.779, -0.390, 0.536, 0.5, -0.5, -0.5, 0.5
+seam_4: 0.779, -0.090, 1.136, 0.5, -0.5, -0.5, 0.5
+seam_5: 0.779, -0.090, 0.836, 0.5, -0.5, -0.5, 0.5
+seam_6: 0.779, -0.090, 0.536, 0.5, -0.5, -0.5, 0.5
+seam_7: 0.779, 0.210, 1.136, 0.5, -0.5, -0.5, 0.5
+seam_8: 0.779, 0.210, 0.836, 0.5, -0.5, -0.5, 0.5
+seam_9: 0.779, 0.210, 0.536, 0.5, -0.5, -0.5, 0.5
+
+Seam 10~18 가로 방향  
+seam_10: 0.779, -0.390, 0.836, 0.5, -0.5, -0.5, 0.5
+seam_11: 0.779, -0.390, 0.536, 0.5, -0.5, -0.5, 0.5
+seam_12: 0.779, -0.390, 0.236, 0.5, -0.5, -0.5, 0.5
+seam_13: 0.779, -0.090, 0.836, 0.5, -0.5, -0.5, 0.5
+seam_14: 0.779, -0.090, 0.536, 0.5, -0.5, -0.5, 0.5
+seam_15: 0.779, -0.090, 0.236, 0.5, -0.5, -0.5, 0.5
+seam_16: 0.779, 0.210, 0.836, 0.5, -0.5, -0.5, 0.5
+seam_17: 0.779, 0.210, 0.536, 0.5, -0.5, -0.5, 0.5
+seam_18: 0.779, 0.210, 0.236, 0.5, -0.5, -0.5, 0.5
