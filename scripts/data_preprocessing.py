@@ -2,42 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-Per-demo contact-origin local frame transform + verification plots (NO z-flip).
+Per-demo contact-origin local frame transform + verification plots (NO z-flip)
 
-Wall / plane:
-- wall_normal is computed from wall_quat (xyzw):
-    n = R(wall_quat) * [0,0,1]   (unit)
-- plane is defined as:
-    n·p = plane_offset
-- signed distance:
-    d(t) = n·p(t) - plane_offset
-  (If n is unit, d has units of meters.)
+Hard constraints (no CLI options):
+  - require_contact = ON  : stable search happens only after d(t) <= contact_d_thresh
+  - require_stable  = ON  : if stable not found -> chosen_idx = -1 and we do NOT build a meaningful frame
 
-Contact & origin selection:
-- First, restrict to "contact side" half-space using:
-    contact_mask = (d <= 0)   # you can change to >= if your convention differs
-- Then find a "stable contact" index where BOTH hold:
-    |d(t)| <= dist_eps        (near plane)
-    |v_n(t)| <= vn_eps        (normal velocity stabilized)
-  for stable_len consecutive steps,
-  starting from first_contact + min_after_contact.
+Plane:
+  d(t) = n·p(t) - plane_offset    (signed distance to plane along normal n)
+
+Contact:
+  first_contact = first index where d(t) <= contact_d_thresh
+
+Stability:
+  find first index where BOTH:
+    d(t) <= contact_d_thresh
+    |v_n_smooth(t)| <= vn_eps
+  for stable_len consecutive steps (searched after first_contact + min_after_contact)
 
 Local frame per demo:
-- z-axis: n (wall normal in base/world)
-- origin: projection of the chosen stable point onto the plane
-- x-axis: estimated stroke tangent after chosen index, projected to plane
-- y-axis: z × x
+  z = wall normal n  (from wall_quat)
+  y = progression direction averaged over stable window, projected onto plane
+  x = y × z (right-handed), then re-orthogonalize y = z × x
+Origin:
+  origin = pos[chosen_idx]    (stable point itself; then we force z_local(chosen)=0)
 
-Outputs:
-- out_npz with:
-    X_local: (N,7) local poses (concat order preserved)
-    frame_origin: (D,3)
-    frame_R_local_to_base: (D,3,3)
-    contact_index: (D,) chosen stable index (or first_contact fallback)
-    first_contact_index: (D,)
-    + all original arrays copied through
-- Plots per selected demo (saved to img_dir):
-    demo_XXX_d_vn_zlocal.png  : d(t), v_n(t), z_local(t) with markers
+Saves:
+  out_npz with X_local + frame metadata + indices
+  per-demo plot images (d, v_n raw/smooth, z_local)
 """
 
 from __future__ import annotations
@@ -129,15 +121,22 @@ def unit(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 
 def project_to_plane(v: np.ndarray, n: np.ndarray) -> np.ndarray:
-    """Remove normal component."""
     return v - np.dot(v, n) * n
 
 
+def moving_average(x: np.ndarray, win: int) -> np.ndarray:
+    """Centered moving average with edge padding. win=1 -> identity."""
+    x = np.asarray(x, dtype=np.float64)
+    if win <= 1:
+        return x.copy()
+    win = int(win)
+    pad = win // 2
+    xp = np.pad(x, (pad, pad), mode="edge")
+    kernel = np.ones(win, dtype=np.float64) / float(win)
+    return np.convolve(xp, kernel, mode="valid")
+
+
 def _first_stable_index(mask: np.ndarray, stable_len: int) -> int:
-    """
-    mask: (T,) bool, True where condition holds
-    return: first index i such that mask[i:i+stable_len] are all True, else -1
-    """
     T = mask.shape[0]
     if stable_len <= 1:
         idx = np.where(mask)[0]
@@ -149,46 +148,65 @@ def _first_stable_index(mask: np.ndarray, stable_len: int) -> int:
     return int(hits[0]) if hits.size else -1
 
 
-def find_contact_and_stable_index(
-    pos: np.ndarray,
-    n: np.ndarray,
-    plane_offset: float,
-    dist_eps: float,
-    vn_eps: float,
-    stable_len: int,
-    min_after_contact: int,
-    contact_sign: str,
-) -> tuple[int, int, np.ndarray, np.ndarray]:
-    """
-    Returns:
-      first_contact_idx, stable_idx, d(T,), vn(T,)
-    """
-    d = pos @ n - plane_offset  # (T,)
-
-    if contact_sign == "le":
-        contact_mask = (d <= 0.0)
-    else:
-        contact_mask = (d >= 0.0)
-
-    cc = np.where(contact_mask)[0]
-    if cc.size == 0:
-        # no contact half-space
-        vn = np.zeros((pos.shape[0],), dtype=np.float64)
-        return -1, -1, d, vn
-
-    first_contact = int(cc[0])
-
+def compute_d_and_vn(pos: np.ndarray, n: np.ndarray, plane_offset: float) -> tuple[np.ndarray, np.ndarray]:
+    d = pos @ n - plane_offset
     dp = np.diff(pos, axis=0)
     vn = np.zeros((pos.shape[0],), dtype=np.float64)
     vn[1:] = dp @ n  # m/step
+    return d, vn
 
-    stable_mask = (np.abs(d) <= dist_eps) & (np.abs(vn) <= vn_eps)
 
-    start = min(pos.shape[0], first_contact + max(0, int(min_after_contact)))
+def stable_window_direction(
+    pos: np.ndarray,
+    n: np.ndarray,
+    stable_idx: int,
+    stable_len: int,
+    use_mean_diffs: bool = True,
+) -> np.ndarray:
+    """Average motion direction within the stable window, projected to plane."""
+    if stable_idx < 0:
+        return np.zeros((3,), dtype=np.float64)
+
+    a = stable_idx
+    b = min(pos.shape[0] - 1, stable_idx + stable_len - 1)
+    if b <= a:
+        return np.zeros((3,), dtype=np.float64)
+
+    if use_mean_diffs:
+        seg = pos[a : b + 1]
+        v = np.diff(seg, axis=0).mean(axis=0)
+    else:
+        v = pos[b] - pos[a]
+
+    return unit(project_to_plane(v, n))
+
+
+def find_contact_and_stable(
+    d: np.ndarray,
+    vn_smooth: np.ndarray,
+    vn_eps: float,
+    stable_len: int,
+    min_after_contact: int,
+    contact_d_thresh: float,
+) -> tuple[int, int]:
+    """
+    HARD require_contact:
+      - first_contact exists only if d <= contact_d_thresh appears.
+    HARD require_stable:
+      - stable exists only if (d<=thresh) & (|vn_smooth|<=vn_eps) holds for stable_len consecutive steps.
+    Returns: (first_contact_idx, stable_idx) (both -1 if not found)
+    """
+    cc = np.where(d <= contact_d_thresh)[0]
+    if cc.size == 0:
+        return -1, -1
+    first_contact = int(cc[0])
+
+    stable_mask = (d <= contact_d_thresh) & (np.abs(vn_smooth) <= vn_eps)
+    start = min(d.shape[0], first_contact + max(0, int(min_after_contact)))
     stable_mask[:start] = False
 
     stable_idx = _first_stable_index(stable_mask, stable_len)
-    return first_contact, stable_idx, d, vn
+    return first_contact, stable_idx
 
 
 def build_local_frame_from_demo(
@@ -196,88 +214,92 @@ def build_local_frame_from_demo(
     wall_normal: np.ndarray,
     plane_offset: float,
     contact_window: int,
-    dist_eps: float,
+    dist_eps: float,  # still used as contact_d_thresh (tolerance)
     vn_eps: float,
     stable_len: int,
     min_after_contact: int,
-    contact_sign: str,
-) -> tuple[np.ndarray, np.ndarray, int, int, np.ndarray, np.ndarray]:
+    vn_smooth_win: int,
+) -> tuple[np.ndarray, np.ndarray, int, int, int, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Returns:
-      origin (3,), R_local_to_base (3,3) columns [x y z],
-      chosen_idx (int), first_contact_idx (int),
-      d(T,), vn(T,)
-    """
-    n = unit(wall_normal)
+    HARD behavior:
+      - require_contact = ON  (need d <= dist_eps)
+      - require_stable  = ON  (need stable window; else chosen=-1 and frame is dummy)
 
-    first_contact, stable_idx, d, vn = find_contact_and_stable_index(
-        pos=pos,
-        n=n,
-        plane_offset=plane_offset,
-        dist_eps=dist_eps,
+    Contact threshold:
+      d <= dist_eps  (NOTE: dist_eps is now "contact tolerance" not "|d|<=...")
+
+    Axes:
+      z = wall normal (from wall_quat)
+      y = progression direction in stable window, projected to plane
+      x = y × z (right-handed), then re-orthogonalize y = z × x
+
+    Origin:
+      origin = pos[chosen_idx]  (chosen_idx == stable_idx)
+    """
+    z = unit(wall_normal)
+
+    d, vn_raw = compute_d_and_vn(pos, z, plane_offset)
+    vn_smooth = moving_average(vn_raw, vn_smooth_win)
+
+    first_c, stable_idx = find_contact_and_stable(
+        d=d,
+        vn_smooth=vn_smooth,
         vn_eps=vn_eps,
         stable_len=stable_len,
         min_after_contact=min_after_contact,
-        contact_sign=contact_sign,
+        contact_d_thresh=dist_eps,
     )
 
-    if first_contact < 0:
-        # fallback: no contact at all
+    # HARD require_stable
+    if stable_idx < 0:
+        # dummy frame (keeps pipeline alive, but chosen stays -1)
         origin = pos[0].copy()
-        z = n
         tmp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         if abs(np.dot(tmp, z)) > 0.9:
             tmp = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        x = unit(np.cross(tmp, z))
+        y = unit(project_to_plane(tmp, z))
+        x = unit(np.cross(y, z))
         y = unit(np.cross(z, x))
         R = np.column_stack([x, y, z])
-        return origin, R, -1, -1, d, vn
+        return origin, R, -1, stable_idx, first_c, d, vn_raw, vn_smooth
 
-    chosen_idx = stable_idx if stable_idx >= 0 else first_contact
+    chosen_idx = stable_idx
+    origin = pos[chosen_idx].copy()
 
-    # origin = projection of chosen point onto plane
-    p_c = pos[chosen_idx].copy()
-    dist = float(np.dot(p_c, n) - plane_offset)
-    origin = p_c - dist * n
+    # Y axis from stable window
+    y = stable_window_direction(pos, z, stable_idx=chosen_idx, stable_len=stable_len, use_mean_diffs=True)
 
-    # tangent direction after chosen index
-    i1 = min(chosen_idx + contact_window, pos.shape[0] - 1)
-    if i1 <= chosen_idx:
-        dp2 = pos[min(chosen_idx + 1, pos.shape[0] - 1)] - pos[chosen_idx]
-    else:
-        dp2 = pos[i1] - pos[chosen_idx]
+    if np.linalg.norm(y) < 1e-9:
+        # fallback: short lookahead
+        i1 = min(chosen_idx + contact_window, pos.shape[0] - 1)
+        y = unit(project_to_plane(pos[i1] - pos[chosen_idx], z))
 
-    tang = project_to_plane(dp2, n)
-    if np.linalg.norm(tang) < 1e-9:
-        j2 = min(chosen_idx + max(3, contact_window), pos.shape[0])
-        seg = pos[chosen_idx:j2]
-        diffs = np.diff(seg, axis=0)
-        diffs = np.array([project_to_plane(v, n) for v in diffs])
-        tang = diffs.sum(axis=0)
+    if np.linalg.norm(y) < 1e-9:
+        # last resort: arbitrary in-plane direction
+        tmp = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        if abs(np.dot(tmp, z)) > 0.9:
+            tmp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        y = unit(project_to_plane(tmp, z))
 
-    if np.linalg.norm(tang) < 1e-9:
-        tmp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        if abs(np.dot(tmp, n)) > 0.9:
-            tmp = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        x = unit(np.cross(tmp, n))
-    else:
-        x = unit(tang)
-
-    z = n
-    y = unit(np.cross(z, x))
+    # X axis (right-handed)
     x = unit(np.cross(y, z))
-    R = np.column_stack([x, y, z])  # local->base
+    if np.linalg.norm(x) < 1e-9:
+        tmp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        x = unit(np.cross(tmp, z))
 
-    return origin, R, chosen_idx, first_contact, d, vn
+    # re-orthogonalize y
+    y = unit(np.cross(z, x))
+
+    R_l2b = np.column_stack([x, y, z])
+    return origin, R_l2b, chosen_idx, stable_idx, first_c, d, vn_raw, vn_smooth
 
 
-def transform_demo_to_local(pos: np.ndarray,
-                            quat: np.ndarray,
-                            origin: np.ndarray,
-                            R_local_to_base: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Base/world -> per-demo local
-    """
+def transform_demo_to_local(
+    pos: np.ndarray,
+    quat: np.ndarray,
+    origin: np.ndarray,
+    R_local_to_base: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     R_b2l = R_local_to_base.T
     pos_local = (R_b2l @ (pos - origin).T).T
 
@@ -285,7 +307,6 @@ def transform_demo_to_local(pos: np.ndarray,
     quat_local = np.empty_like(quat, dtype=np.float64)
     for i in range(quat.shape[0]):
         quat_local[i] = q_mul(q_b2l, q_normalize(quat[i]))
-
     return pos_local, quat_local
 
 
@@ -294,27 +315,22 @@ def main():
     ap.add_argument("--in_npz", default="/home/sungboo/rb10_control/dataset/demo_20260122.npz")
     ap.add_argument("--out_npz", default="/home/sungboo/rb10_control/dataset/demo_20260122_local.npz")
 
-    # plane params
+    # plane / normal
     ap.add_argument("--plane_offset", type=float, default=-0.779)
-    ap.add_argument("--wall_quat", type=float, nargs=4, default=[0.5, -0.5, -0.5, 0.5])  # xyzw
+    ap.add_argument("--wall_quat", type=float, nargs=4, default=[0.5, -0.5, -0.5, 0.5])
 
-    # contact side convention
-    ap.add_argument("--contact_sign", choices=["le", "ge"], default="le",
-                    help="Contact side half-space. le: d<=0 is contact side, ge: d>=0 is contact side.")
+    # thresholds
+    ap.add_argument("--dist_eps", type=float, default=0.003, help="Contact tolerance for d(t): require d(t) <= dist_eps (m).")
+    ap.add_argument("--vn_eps", type=float, default=0.0003, help="Normal velocity stability threshold (m/step).")
+    ap.add_argument("--stable_len", type=int, default=10, help="Consecutive steps for stability.")
+    ap.add_argument("--min_after_contact", type=int, default=0, help="Start stable search after first_contact + this.")
 
-    # stability params
-    ap.add_argument("--dist_eps", type=float, default=0.003, help="|d| <= dist_eps (m), default 3mm")
-    ap.add_argument("--vn_eps", type=float, default=0.001, help="|v_n| <= vn_eps (m/step)")
-    ap.add_argument("--stable_len", type=int, default=8, help="consecutive steps for stability")
-    ap.add_argument("--min_after_contact", type=int, default=0, help="start stability search after first_contact + this")
-
-    # local frame tangent estimation
+    ap.add_argument("--vn_smooth_win", type=int, default=9, help="Moving average window for vn (odd recommended).")
     ap.add_argument("--contact_window", type=int, default=10)
 
     # plotting
     ap.add_argument("--plot_demo_indices", type=int, nargs="*", default=[0, 4, 8, 12])
     ap.add_argument("--img_dir", default="/home/sungboo/rb10_control/images/demo_20260122")
-
     args = ap.parse_args()
 
     in_path = Path(args.in_npz)
@@ -339,18 +355,20 @@ def main():
     X_local = np.empty_like(X, dtype=np.float32)
     frame_origin = np.zeros((D, 3), dtype=np.float64)
     frame_R = np.zeros((D, 3, 3), dtype=np.float64)
-    contact_index = np.full((D,), -1, dtype=np.int32)
+
+    chosen_index = np.full((D,), -1, dtype=np.int32)
+    stable_index = np.full((D,), -1, dtype=np.int32)
     first_contact_index = np.full((D,), -1, dtype=np.int32)
 
-    # store debug series for plotted demos only (save in separate dict)
     debug_series = {}
+    plot_set = set(args.plot_demo_indices)
 
     for i in range(D):
         s, e = int(ptr[i]), int(ptr[i + 1])
         pos = X[s:e, 0:3].astype(np.float64)
         quat = X[s:e, 3:7].astype(np.float64)
 
-        origin, R_l2b, chosen_idx, first_c, d_series, vn_series = build_local_frame_from_demo(
+        origin, R_l2b, chosen_idx, stable_idx, first_c, d_series, vn_raw, vn_smooth = build_local_frame_from_demo(
             pos=pos,
             wall_normal=wall_normal,
             plane_offset=args.plane_offset,
@@ -359,44 +377,55 @@ def main():
             vn_eps=args.vn_eps,
             stable_len=args.stable_len,
             min_after_contact=args.min_after_contact,
-            contact_sign=args.contact_sign,
+            vn_smooth_win=args.vn_smooth_win,
         )
 
         pos_l, quat_l = transform_demo_to_local(pos, quat, origin, R_l2b)
+
+        # enforce z_local(chosen) == 0 when chosen exists
+        if chosen_idx >= 0:
+            pos_l[:, 2] -= pos_l[chosen_idx, 2]
 
         X_local[s:e, 0:3] = pos_l.astype(np.float32)
         X_local[s:e, 3:7] = quat_l.astype(np.float32)
 
         frame_origin[i] = origin
         frame_R[i] = R_l2b
-        contact_index[i] = chosen_idx
+        chosen_index[i] = chosen_idx
+        stable_index[i] = stable_idx
         first_contact_index[i] = first_c
 
-        if i in set(args.plot_demo_indices):
+        if i in plot_set:
             debug_series[i] = {
                 "d": d_series.astype(np.float32),
-                "vn": vn_series.astype(np.float32),
+                "vn_raw": vn_raw.astype(np.float32),
+                "vn_smooth": vn_smooth.astype(np.float32),
                 "z_local": pos_l[:, 2].astype(np.float32),
                 "chosen_idx": int(chosen_idx),
+                "stable_idx": int(stable_idx),
                 "first_contact": int(first_c),
                 "name": str(names[i]),
             }
 
-    # save npz (keep original keys too)
+    # save npz
     out = {k: dnpz[k] for k in dnpz.files}
     out["X_local"] = X_local
     out["frame_origin"] = frame_origin
     out["frame_R_local_to_base"] = frame_R
-    out["contact_index"] = contact_index
+    out["chosen_index"] = chosen_index
+    out["stable_index"] = stable_index
     out["first_contact_index"] = first_contact_index
     out["wall_normal_base"] = wall_normal
     out["plane_offset"] = np.array([args.plane_offset], dtype=np.float64)
     out["wall_quat_xyzw"] = np.array(args.wall_quat, dtype=np.float64)
-    out["contact_sign"] = np.array([args.contact_sign], dtype=object)
-
+    out["dist_eps"] = np.array([args.dist_eps], dtype=np.float64)
+    out["vn_eps"] = np.array([args.vn_eps], dtype=np.float64)
+    out["stable_len"] = np.array([args.stable_len], dtype=np.int32)
+    out["min_after_contact"] = np.array([args.min_after_contact], dtype=np.int32)
+    out["vn_smooth_win"] = np.array([args.vn_smooth_win], dtype=np.int32)
     np.savez_compressed(out_path, **out)
 
-    # ---- Plot d(t), vn(t), z_local(t) for selected demos
+    # ---- plots
     import matplotlib.pyplot as plt
 
     for i in args.plot_demo_indices:
@@ -405,63 +434,68 @@ def main():
 
         ds = debug_series[i]
         d_series = ds["d"]
-        vn_series = ds["vn"]
+        vn_raw = ds["vn_raw"]
+        vn_sm = ds["vn_smooth"]
         zloc = ds["z_local"]
+
         T = d_series.shape[0]
         tt = np.arange(T)
 
         fc = ds["first_contact"]
+        si = ds["stable_idx"]
         ci = ds["chosen_idx"]
 
-        # 1 figure, 3 panels (d, vn, z_local)
-        plt.figure(figsize=(10, 8))
+        plt.figure(figsize=(11, 9))
 
         ax1 = plt.subplot(3, 1, 1)
         ax1.plot(tt, d_series)
-        ax1.axhline(+args.dist_eps, linestyle=":")
-        ax1.axhline(-args.dist_eps, linestyle=":")
+        ax1.axhline(args.dist_eps, linestyle=":")
         ax1.axhline(0.0, linestyle="--")
         if fc >= 0:
             ax1.axvline(fc, linestyle="--")
-        if ci >= 0:
-            ax1.axvline(ci, linestyle="-")
-        ax1.set_ylabel("d(t) [m]")
-        ax1.set_title(f"{i} {ds['name']}  first_contact={fc}  chosen={ci}")
+        if si >= 0:
+            ax1.axvline(si, linestyle="-")
+        ax1.set_ylabel("d(t) [m]  (need d<=dist_eps)")
 
         ax2 = plt.subplot(3, 1, 2, sharex=ax1)
-        ax2.plot(tt, vn_series)
+        ax2.plot(tt, vn_raw, label="vn_raw")
+        ax2.plot(tt, vn_sm, label="vn_smooth")
         ax2.axhline(+args.vn_eps, linestyle=":")
         ax2.axhline(-args.vn_eps, linestyle=":")
         ax2.axhline(0.0, linestyle="--")
         if fc >= 0:
             ax2.axvline(fc, linestyle="--")
-        if ci >= 0:
-            ax2.axvline(ci, linestyle="-")
-        ax2.set_ylabel("v_n(t) [m/step]")
+        if si >= 0:
+            ax2.axvline(si, linestyle="-")
+        ax2.set_ylabel("v_n [m/step]")
+        ax2.legend(loc="upper right")
 
         ax3 = plt.subplot(3, 1, 3, sharex=ax1)
         ax3.plot(tt, zloc)
         ax3.axhline(0.0, linestyle="--")
         if fc >= 0:
             ax3.axvline(fc, linestyle="--")
-        if ci >= 0:
-            ax3.axvline(ci, linestyle="-")
+        if si >= 0:
+            ax3.axvline(si, linestyle="-")
         ax3.set_xlabel("t [step]")
         ax3.set_ylabel("z_local(t) [m]")
 
+        ax1.set_title(f"{i} {ds['name']}  first={fc}  stable={si}  chosen={ci}")
         plt.tight_layout()
-        plt.savefig(str(img_dir / f"demo_{i:03d}_d_vn_zlocal.png"))
+        plt.savefig(str(img_dir / f"demo_{i:03d}_d_vnraw_vnsm_zlocal.png"))
         plt.close()
 
-    # ---- Summary stats
-    n_contact_side = int(np.sum(first_contact_index >= 0))
-    n_stable = int(np.sum(contact_index >= 0))
+    n_contact = int(np.sum(first_contact_index >= 0))
+    n_stable = int(np.sum(stable_index >= 0))
+    n_chosen = int(np.sum(chosen_index >= 0))
+
     print(f"[saved] {out_path}")
     print(f"  demos: {D}")
-    print(f"  contact_side_found: {n_contact_side}/{D}  (contact_sign={args.contact_sign})")
-    print(f"  chosen_found: {n_stable}/{D}  (stable window if possible; else fallback to first_contact)")
+    print(f"  contact_found: {n_contact}/{D}   (require d<=dist_eps)")
+    print(f"  stable_found:  {n_stable}/{D}   (require d<=dist_eps AND |vn_smooth|<=vn_eps for stable_len)")
+    print(f"  chosen_found:  {n_chosen}/{D}   (require_stable=ON)")
     print(f"  wall_normal(base): {wall_normal}")
-    print(f"  figures: {img_dir}/demo_XXX_d_vn_zlocal.png")
+    print(f"  figures: {img_dir}/demo_XXX_d_vnraw_vnsm_zlocal.png")
 
 
 if __name__ == "__main__":
