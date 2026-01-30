@@ -66,8 +66,8 @@ def main():
         # -------------------------
         # STEP 4: fix mask
         # -------------------------
-        if "mask" in data:
-            mask = data["mask"]
+        if "mask" in f:
+            mask = f["mask"]
             for mk in list(mask.keys()):
                 raw = mask[mk][...]
                 new_list = []

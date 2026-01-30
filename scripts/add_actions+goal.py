@@ -152,26 +152,60 @@ def compute_actions_rot6d(pos: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
 
 SEAM_LENGTH_CONST = 0.3  # meters
 
-# seam_id -> (origin_xyz, quat_xyzw)
+# --- (1) 아래 유틸 추가: quaternion multiply (xyzw) ---
+def q_mul(a_xyzw: np.ndarray, b_xyzw: np.ndarray) -> np.ndarray:
+    """
+    Hamilton product for quaternions in xyzw order.
+    """
+    a = np.asarray(a_xyzw, dtype=np.float64)
+    b = np.asarray(b_xyzw, dtype=np.float64)
+    ax, ay, az, aw = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
+    bx, by, bz, bw = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
+
+    x = aw * bx + ax * bw + ay * bz - az * by
+    y = aw * by - ax * bz + ay * bw + az * bx
+    z = aw * bz + ax * by - ay * bx + az * bw
+    w = aw * bw - ax * bx - ay * by - az * bz
+    return np.stack([x, y, z, w], axis=-1)
+
+
+# --- (2) seam quaternion 상수 정의 (세로/가로) ---
+Q_VERT = np.array([0.5, -0.5, -0.5, 0.5], dtype=np.float64)  # xyzw (네가 준 값)
+
+# world Z axis +90deg rotation: q = [0,0,sin(45°),cos(45°)] in xyzw
+Q_Z90  = np.array([0.0, 0.0, np.sin(np.pi/4), np.cos(np.pi/4)], dtype=np.float64)
+
+# horizontal = (Z+90) ⊗ vertical  (xyzw Hamilton product)
+Q_HORZ = q_normalize(q_mul(Q_Z90, Q_VERT))
+
+# (원하면 아래 출력으로 값 확인 가능)
+# print("Q_VERT:", Q_VERT)
+# print("Q_HORZ:", Q_HORZ)
+
+
+# --- (3) SEAMS 딕셔너리에서 quaternion만 교체 ---
 SEAMS = {
-    1:  ((0.779, -0.390, 1.136), (0.5, -0.5, -0.5, 0.5)),
-    2:  ((0.779, -0.390, 0.836), (0.5, -0.5, -0.5, 0.5)),
-    3:  ((0.779, -0.390, 0.536), (0.5, -0.5, -0.5, 0.5)),
-    4:  ((0.779, -0.090, 1.136), (0.5, -0.5, -0.5, 0.5)),
-    5:  ((0.779, -0.090, 0.836), (0.5, -0.5, -0.5, 0.5)),
-    6:  ((0.779, -0.090, 0.536), (0.5, -0.5, -0.5, 0.5)),
-    7:  ((0.779,  0.210, 1.136), (0.5, -0.5, -0.5, 0.5)),
-    8:  ((0.779,  0.210, 0.836), (0.5, -0.5, -0.5, 0.5)),
-    9:  ((0.779,  0.210, 0.536), (0.5, -0.5, -0.5, 0.5)),
-    10: ((0.779, -0.390, 0.836), (0.5, -0.5, -0.5, 0.5)),
-    11: ((0.779, -0.390, 0.536), (0.5, -0.5, -0.5, 0.5)),
-    12: ((0.779, -0.390, 0.236), (0.5, -0.5, -0.5, 0.5)),
-    13: ((0.779, -0.090, 0.836), (0.5, -0.5, -0.5, 0.5)),
-    14: ((0.779, -0.090, 0.536), (0.5, -0.5, -0.5, 0.5)),
-    15: ((0.779, -0.090, 0.236), (0.5, -0.5, -0.5, 0.5)),
-    16: ((0.779,  0.210, 0.836), (0.5, -0.5, -0.5, 0.5)),
-    17: ((0.779,  0.210, 0.536), (0.5, -0.5, -0.5, 0.5)),
-    18: ((0.779,  0.210, 0.236), (0.5, -0.5, -0.5, 0.5)),
+    # 1~9: 세로 방향 (그대로)
+    1:  ((0.779, -0.390, 1.136), tuple(Q_VERT.tolist())),
+    2:  ((0.779, -0.390, 0.836), tuple(Q_VERT.tolist())),
+    3:  ((0.779, -0.390, 0.536), tuple(Q_VERT.tolist())),
+    4:  ((0.779, -0.090, 1.136), tuple(Q_VERT.tolist())),
+    5:  ((0.779, -0.090, 0.836), tuple(Q_VERT.tolist())),
+    6:  ((0.779, -0.090, 0.536), tuple(Q_VERT.tolist())),
+    7:  ((0.779,  0.210, 1.136), tuple(Q_VERT.tolist())),
+    8:  ((0.779,  0.210, 0.836), tuple(Q_VERT.tolist())),
+    9:  ((0.779,  0.210, 0.536), tuple(Q_VERT.tolist())),
+
+    # 10~18: 가로 방향 (Q_HORZ로 교체)
+    10: ((0.779, -0.390, 0.836), tuple(Q_HORZ.tolist())),
+    11: ((0.779, -0.390, 0.536), tuple(Q_HORZ.tolist())),
+    12: ((0.779, -0.390, 0.236), tuple(Q_HORZ.tolist())),
+    13: ((0.779, -0.090, 0.836), tuple(Q_HORZ.tolist())),
+    14: ((0.779, -0.090, 0.536), tuple(Q_HORZ.tolist())),
+    15: ((0.779, -0.090, 0.236), tuple(Q_HORZ.tolist())),
+    16: ((0.779,  0.210, 0.836), tuple(Q_HORZ.tolist())),
+    17: ((0.779,  0.210, 0.536), tuple(Q_HORZ.tolist())),
+    18: ((0.779,  0.210, 0.236), tuple(Q_HORZ.tolist())),
 }
 
 

@@ -147,8 +147,10 @@ python3 /home/sungboo/rb10_control/scripts/cluster_apriltag.py \
 - seam_17: 0.779, 0.210, 0.536, 0.5, -0.5, -0.5, 0.5
 - seam_18: 0.779, 0.210, 0.236, 0.5, -0.5, -0.5, 0.5
 
+## Local frame으로 변환
 
-# Robomimc training (Diffusion)
+
+# 6-1. Robomimc training (Diffusion)
 python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py \
   --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
 

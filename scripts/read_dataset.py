@@ -173,10 +173,10 @@ def main():
         # ---- skill mask 리스트업 ----
         skill_ids = []
         skill_keys = []
-        if "mask" not in data:
+        if "mask" not in f:
             print("  <no /data/mask group>")
         else:
-            mask = data["mask"]
+            mask = f["mask"]
 
             skill_keys = sorted(
                 [k for k in mask.keys() if k.startswith("skill_")],
