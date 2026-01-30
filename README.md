@@ -94,6 +94,9 @@ python3 /home/sungboo/rb10_control/scripts/add_actions+goal.py \
   --out /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 \
   --overwrite
 
+python3 /home/sungboo/rb10_control/scripts/export_ee_npz.py --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 --out /home/sungboo/rb10_control/dataset/demo_20260122.npz
+
+## Dataset 정보 확인
 python3 /home/sungboo/rb10_control/scripts/read_dataset.py \
   --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5 \
   --out-dir /home/sungboo/rb10_control/images/demo_20260122/
@@ -151,6 +154,5 @@ python3 /home/sungboo/rb10_control/scripts/cluster_apriltag.py \
 
 
 # 6-1. Robomimc training (Diffusion)
-python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py \
-  --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
+python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
 
