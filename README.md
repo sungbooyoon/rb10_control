@@ -160,6 +160,30 @@ python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py --
 # 6-2. ProMP modeling
 /home/sungboo/rb10_control/scripts/inspect_npz.py --npz /home/sungboo/rb10_control/dataset/demo_20260122_final.npz
 
-python /home/sungboo/rb10_control/scripts/build_skill_library.py --model promp --plot
-python /home/sungboo/rb10_control/scripts/build_skill_library.py --model promp --use_cond_promp --plot
-python /home/sungboo/rb10_control/scripts/build_skill_library.py --model dmp --plot
+python /home/sungboo/rb10_control/scripts/train.py \
+  --model dmp \
+  --out /home/sungboo/rb10_control/dataset/dmp.pkl
+
+python /home/sungboo/rb10_control/scripts/train.py \
+  --model promp \
+  --out /home/sungboo/rb10_control/dataset/promp.pkl
+
+python /home/sungboo/rb10_control/scripts/train.py \
+  --model cpromp \
+  --out /home/sungboo/rb10_control/dataset/cpromp.pkl
+
+# 7. Evalutation
+python /home/sungboo/rb10_control/scripts/eval.py \
+  --pkl /home/sungboo/rb10_control/dataset/dmp.pkl \
+  --plot --plot_demo 0 \
+  --plot_dir /home/sungboo/rb10_control/images/demo_20260122/dmp
+
+python /home/sungboo/rb10_control/scripts/eval.py \
+  --pkl /home/sungboo/rb10_control/dataset/promp.pkl \
+  --plot --plot_demo 0 \
+  --plot_dir /home/sungboo/rb10_control/images/demo_20260122/promp
+
+python /home/sungboo/rb10_control/scripts/eval.py \
+  --pkl /home/sungboo/rb10_control/dataset/cpromp.pkl \
+  --plot --plot_demo 0 \
+  --plot_dir /home/sungboo/rb10_control/images/demo_20260122/cpromp
