@@ -172,6 +172,11 @@ python /home/sungboo/rb10_control/scripts/train.py \
   --model cpromp \
   --out /home/sungboo/rb10_control/dataset/cpromp.pkl
 
+## Skill discovery
+python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl
+python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl --standardize
+<!-- python3 /home/sungboo/rb10_control/scripts/discover_skills_hsmm.py --out /home/sungboo/rb10_control/dataset/test_hsmm.pkl --backend pyhsmm -->
+
 # 7. Evalutation
 python /home/sungboo/rb10_control/scripts/eval.py \
   --pkl /home/sungboo/rb10_control/dataset/dmp.pkl \
@@ -187,3 +192,4 @@ python /home/sungboo/rb10_control/scripts/eval.py \
   --pkl /home/sungboo/rb10_control/dataset/cpromp.pkl \
   --plot --plot_demo 0 \
   --plot_dir /home/sungboo/rb10_control/images/demo_20260122/cpromp
+
