@@ -158,4 +158,8 @@ python3 /home/sungboo/rb10_control/scripts/data_preprocessing.py
 python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
 
 # 6-2. ProMP modeling
+/home/sungboo/rb10_control/scripts/inspect_npz.py --npz /home/sungboo/rb10_control/dataset/demo_20260122_final.npz
+
 python /home/sungboo/rb10_control/scripts/build_skill_library.py --model promp --plot
+python /home/sungboo/rb10_control/scripts/build_skill_library.py --model promp --use_cond_promp --plot
+python /home/sungboo/rb10_control/scripts/build_skill_library.py --model dmp --plot

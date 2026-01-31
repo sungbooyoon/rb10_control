@@ -525,7 +525,7 @@ def resample_piecewise_timewarp_3seg(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_npz", default="/home/sungboo/rb10_control/dataset/demo_20260122.npz")
-    ap.add_argument("--out_npz", default="/home/sungboo/rb10_control/dataset/demo_20260122_final_phase_logmap.npz")
+    ap.add_argument("--out_npz", default="/home/sungboo/rb10_control/dataset/demo_20260122_final.npz")
 
     # plane / normal
     ap.add_argument("--plane_offset", type=float, default=-0.779)
