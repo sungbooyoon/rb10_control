@@ -13,14 +13,25 @@ Evaluate & plot skill library from a saved PKL.
     * cProMP: per-demo conditioned mean vs demo (overall + rep-top5)
 - Optional plotting:
     * overlay plot for a chosen demo index: demo vs ProMP mean vs cProMP mean vs DMP open_loop
-    * (NEW) skill 1~8: xyz+wxwywz mean in ONE figure (ProMP prior)
-    * (NEW) skill 1~8: xyz+wxwywz mean in ONE figure (cProMP representative demo per skill)
+    * skill 1~8: ProMP prior mean (xyz+wxwywz) in ONE figure
+    * skill 1~8: per-skill demo mean ± std in SEPARATE figures
+    * (NEW) skill 1~8: per-skill ProMP prior mean ± conf (from saved var/conf) in SEPARATE figures
+    * (NEW) skill 1~8: per-skill cProMP conditioned mean ± conf (pick 1 representative demo per skill) in SEPARATE figures
 
 Assumptions:
 - NPZ contains X_phase_crop (N,3), W_phase_crop (N,3),
   demo_ptr_phase (D+1,), demo_ptr_crop (D+1,),
   and either skill_id_crop (N_crop,) OR demo_skill_id_crop (D,).
 - Payload.pkl contains library with keys among ["dmp","promp","cpromp"] and (optionally) "rep_top5".
+- To enable confidence-band plots:
+    * ProMP entries should store either:
+        - "y_var": (T,6) variance trajectory (per-dim), OR
+        - "y_conf": (T,6) already-computed confidence width (e.g., std), OR
+        - "y_std": (T,6) std trajectory (treated as conf)
+    * cProMP conditioned_per_demo items should store either:
+        - "y_cvar": (T,6) variance trajectory, OR
+        - "y_cconf": (T,6) conf width trajectory, OR
+        - "y_cstd": (T,6) std trajectory
 """
 
 from __future__ import annotations
@@ -34,7 +45,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from movement_primitives.dmp import CartesianDMP
-from movement_primitives.promp import ProMP
+from movement_primitives.promp import ProMP  # noqa: F401  (kept for compatibility)
 
 import pytransform3d.rotations as pr
 import pytransform3d.transformations as pt
@@ -123,6 +134,79 @@ def summarize(vals: List[float]) -> Dict[str, float]:
     if x.size == 0:
         return {"mean": np.nan, "median": np.nan, "max": np.nan}
     return {"mean": float(np.mean(x)), "median": float(np.median(x)), "max": float(np.max(x))}
+
+
+def compute_within_between_variance(
+    Y_all: np.ndarray,          # (N,6) concatenated
+    ptrp: np.ndarray,           # (D+1,)
+    demo_skill: np.ndarray,     # (D,)
+    skills: Optional[List[int]] = None,
+) -> Dict[str, float]:
+    """
+    ANOVA-style within/between variance on full trajectories.
+    Each demo is flattened to vector of length (T*6).
+    """
+    Y_all = np.asarray(Y_all, dtype=np.float64)
+    ptrp = np.asarray(ptrp, dtype=np.int64)
+    demo_skill = np.asarray(demo_skill, dtype=np.int64)
+
+    D = int(ptrp.shape[0] - 1)
+    assert demo_skill.shape[0] == D
+
+    X_list = []
+    S_list = []
+    for i in range(D):
+        sp, ep = int(ptrp[i]), int(ptrp[i + 1])
+        if ep <= sp:
+            continue
+        sid = int(demo_skill[i])
+        if sid < 0:
+            continue
+        if skills is not None and sid not in skills:
+            continue
+        Xi = Y_all[sp:ep]         # (T,6)
+        X_list.append(Xi.reshape(-1))
+        S_list.append(sid)
+
+    if len(X_list) == 0:
+        return {
+            "WSS": np.nan, "BSS": np.nan,
+            "within_per_dof": np.nan, "between_per_dof": np.nan,
+            "separation_ratio": np.nan,
+            "N": 0, "dim": 0
+        }
+
+    X = np.stack(X_list, axis=0)  # (N, P)
+    S = np.asarray(S_list, dtype=np.int64)
+    N, P = X.shape
+
+    mu = np.mean(X, axis=0)
+
+    uniq = np.unique(S) if skills is None else np.asarray(sorted(set(skills)), dtype=np.int64)
+    WSS = 0.0
+    BSS = 0.0
+    for sid in uniq:
+        idx = np.where(S == sid)[0]
+        if idx.size == 0:
+            continue
+        Xk = X[idx]
+        muk = np.mean(Xk, axis=0)
+        WSS += float(np.sum((Xk - muk) ** 2))
+        BSS += float(idx.size * np.sum((muk - mu) ** 2))
+
+    within_per_dof = WSS / (N * P)
+    between_per_dof = BSS / (N * P)
+    separation_ratio = BSS / (WSS + 1e-12)
+
+    return {
+        "WSS": WSS,
+        "BSS": BSS,
+        "within_per_dof": within_per_dof,
+        "between_per_dof": between_per_dof,
+        "separation_ratio": separation_ratio,
+        "N": int(N),
+        "dim": int(P),
+    }
 
 
 # -----------------------------
@@ -320,6 +404,45 @@ def pick_rep_top5_demos_for_skill(
 
 
 # -----------------------------
+# Confidence helpers (NEW)
+# -----------------------------
+def _as_TD(arr: Optional[np.ndarray], T: int, D: int) -> Optional[np.ndarray]:
+    if arr is None:
+        return None
+    x = np.asarray(arr, dtype=np.float64)
+    if x.ndim == 1:
+        if x.size == D:
+            x = np.tile(x.reshape(1, D), (T, 1))
+        elif x.size == T:
+            x = np.tile(x.reshape(T, 1), (1, D))
+        else:
+            return None
+    if x.ndim != 2:
+        return None
+    if x.shape[0] != T:
+        # try resample along time if shapes look like (T_other, D)
+        if x.shape[1] == D:
+            x = resample(x, T)
+        else:
+            return None
+    if x.shape[1] != D:
+        return None
+    return x
+
+
+def _extract_mean_conf_from_entry(entry: dict, mean_key: str, var_key: str, T: int, D: int):
+    """
+    Returns (mean(T,D), conf(T,D) or None).
+    Conf is treated as "band width" (e.g., std). If variance is provided, conf=sqrt(var).
+    """
+    mu = _as_TD(entry.get(mean_key, None), T, D)
+    var = _as_TD(entry.get(var_key, None), T, D)
+    conf = 1.96 * np.sqrt(var) if var is not None else None
+    
+    return mu, conf
+
+
+# -----------------------------
 # Plot util
 # -----------------------------
 def plot_overlay_6d(
@@ -401,6 +524,96 @@ def plot_skill_means_1to8(
     plt.close()
 
 
+def plot_skill_demo_mean_std_6d(
+    sid: int,
+    demos: List[np.ndarray],   # list of (T,6)
+    t: np.ndarray,             # (T,)
+    out_png: Path,
+    title_prefix: str = "",
+):
+    """
+    For one skill: plot mean curve + std shading (across demos) for each of 6 dims.
+    """
+    if len(demos) == 0:
+        return
+
+    Y = np.stack(demos, axis=0)  # (N,T,6)
+    mu = np.mean(Y, axis=0)      # (T,6)
+    sd = np.std(Y, axis=0, ddof=1) if Y.shape[0] >= 2 else np.zeros_like(mu)
+
+    labels = ["x", "y", "z", "wx", "wy", "wz"]
+    t = np.asarray(t, dtype=np.float64).reshape(-1)
+
+    plt.figure(figsize=(12, 14))
+    for k in range(6):
+        ax = plt.subplot(6, 1, k + 1)
+        ax.plot(t, mu[:, k], label="demo mean")
+        ax.fill_between(
+            t,
+            (mu[:, k] - sd[:, k]).ravel(),
+            (mu[:, k] + sd[:, k]).ravel(),
+            alpha=0.25,
+            label="±1 std" if k == 0 else None
+        )
+        ax.set_ylabel(labels[k])
+        if k == 0:
+            ax.set_title(f"{title_prefix}skill {sid}: demo mean ± std (phase-aligned)")
+            ax.legend(loc="upper right", fontsize=9)
+        if k == 5:
+            ax.set_xlabel("t (0..1)")
+
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png)
+    plt.close()
+
+
+def plot_skill_mean_conf_6d(
+    sid: int,
+    t: np.ndarray,              # (T,)
+    y_mean: np.ndarray,         # (T,6)
+    y_conf: np.ndarray,         # (T,6)
+    out_png: Path,
+    title: str,
+):
+    """
+    Plot mean curve + conf shading (mean ± conf) for each of 6 dims.
+    This directly supports the style you asked for:
+      ax.fill_between(t, (mean-conf).ravel(), (mean+conf).ravel(), alpha=...)
+    """
+    t = np.asarray(t, dtype=np.float64).reshape(-1)
+    y_mean = np.asarray(y_mean, dtype=np.float64)
+    y_conf = np.asarray(y_conf, dtype=np.float64)
+
+    if y_mean.shape[0] != t.shape[0]:
+        y_mean = resample(y_mean, t.shape[0])
+    if y_conf.shape[0] != t.shape[0]:
+        y_conf = resample(y_conf, t.shape[0])
+
+    labels = ["x", "y", "z", "wx", "wy", "wz"]
+    plt.figure(figsize=(12, 14))
+    for k in range(6):
+        ax = plt.subplot(6, 1, k + 1)
+        ax.plot(t, y_mean[:, k], label="mean")
+        ax.fill_between(
+            t,
+            (y_mean[:, k] - y_conf[:, k]).ravel(),
+            (y_mean[:, k] + y_conf[:, k]).ravel(),
+            alpha=0.30,
+            label="±conf" if k == 0 else None
+        )
+        ax.set_ylabel(labels[k])
+        if k == 0:
+            ax.set_title(f"{title} (skill {sid})")
+            ax.legend(loc="upper right", fontsize=9)
+        if k == 5:
+            ax.set_xlabel("t (0..1)")
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png)
+    plt.close()
+
+
 # -----------------------------
 # Core: build Y_list/used/csce_list
 # -----------------------------
@@ -441,6 +654,32 @@ def build_skill_lists(
     return Y_list, used, csce_list
 
 
+def collect_skill_demo_curves_1to8(
+    Y_all: np.ndarray,
+    ptrp: np.ndarray,
+    demo_skill: np.ndarray,
+    min_len: int,
+) -> Dict[int, List[np.ndarray]]:
+    """
+    Returns: sid -> list of (T,6) demo trajectories (phase-aligned already).
+    """
+    out: Dict[int, List[np.ndarray]] = {sid: [] for sid in range(1, 9)}
+    D = int(ptrp.shape[0] - 1)
+    for i in range(D):
+        sid = int(demo_skill[i])
+        if sid < 1 or sid > 8:
+            continue
+        sp, ep = int(ptrp[i]), int(ptrp[i + 1])
+        if ep <= sp:
+            continue
+        y = np.asarray(Y_all[sp:ep], dtype=np.float64)
+        if y.shape[0] < min_len:
+            continue
+        out[sid].append(y)
+    out = {sid: demos for sid, demos in out.items() if len(demos) > 0}
+    return out
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -467,11 +706,9 @@ def main():
     min_len = int(args.min_len) if args.min_len is not None else int(payload.get("min_len", 10))
     drop_demos = args.drop_demos if args.drop_demos is not None else list(map(int, payload.get("drop_demos", [])))
 
-    # contact steps override (may not exist in payload)
     pre_steps = int(args.pre_contact_steps) if args.pre_contact_steps is not None else int(payload.get("pre_contact_steps", 10))
     post_steps = int(args.post_contact_steps) if args.post_contact_steps is not None else int(payload.get("post_contact_steps", 10))
 
-    # plot dir
     plot_dir = Path(args.plot_dir) if args.plot_dir is not None else Path(payload.get("plot_dir", "./skill_library_eval_plots"))
     if args.plot:
         plot_dir.mkdir(parents=True, exist_ok=True)
@@ -515,6 +752,19 @@ def main():
     Y_all = np.concatenate([Xp, Wp], axis=1)
     if Y_all.shape[1] != 6:
         raise ValueError(f"Expected 6D (xyz+rotvec), got {Y_all.shape}")
+
+    # ---- Global within/between variance across skills 1..8 ----
+    vb = compute_within_between_variance(
+        Y_all=Y_all,
+        ptrp=ptrp,
+        demo_skill=demo_skill,
+        skills=list(range(1, 9)),
+    )
+    print("\n[variance] within/between over full phase trajectories (skills 1..8)")
+    print(f"  N demos used: {vb['N']}, flattened dim: {vb['dim']}")
+    print(f"  within_per_dof  = {vb['within_per_dof']:.6g}")
+    print(f"  between_per_dof = {vb['between_per_dof']:.6g}")
+    print(f"  separation_ratio (B/W) = {vb['separation_ratio']:.6g}")
 
     # ---- group by skill (post-drop indices) ----
     skill_to_demo_idxs: Dict[int, List[int]] = {}
@@ -584,13 +834,10 @@ def main():
         if int(sid) in lib.get("dmp", {}):
             dmp_entry = lib["dmp"][int(sid)]
 
-            # NEW: handle both formats (backward compatible)
             if isinstance(dmp_entry, list):
-                # old per-demo format (legacy)
                 dmp_map = {int(it["demo_index_phase"]): it["dmp"] for it in dmp_entry}
                 get_dmp_for_demo = lambda di: dmp_map.get(int(di), None)
             elif isinstance(dmp_entry, dict):
-                # new prototype format (mean-w)
                 dmp_proto = dmp_entry.get("dmp", None)
                 if dmp_proto is None:
                     print("[DMP] entry has no 'dmp' -> skip")
@@ -604,9 +851,6 @@ def main():
             rmse_pos_all, rmse_rot_all, rmse_all_all = [], [], []
             rmse_pos_top, rmse_rot_top, rmse_all_top = [], [], []
 
-            # IMPORTANT:
-            # If your CartesianDMP open_loop length differs from demo length,
-            # rmse_pos_rot_all() already resamples yref to y length.
             for di in used:
                 sp, ep = int(ptrp[di]), int(ptrp[di + 1])
                 y_demo = np.asarray(Y_all[sp:ep], dtype=np.float64)
@@ -615,7 +859,6 @@ def main():
                 if dmp_use is None:
                     continue
 
-                # reset before rollout to avoid state carryover between demos
                 try:
                     dmp_use.reset()
                 except Exception:
@@ -651,7 +894,6 @@ def main():
             print(f"  all mean/med/max = {s_top_all['mean']:.6g}/{s_top_all['median']:.6g}/{s_top_all['max']:.6g}")
         else:
             print("[DMP] not in pkl")
-
 
         # ---- ProMP prior metrics ----
         if int(sid) in lib.get("promp", {}):
@@ -735,9 +977,10 @@ def main():
             print("[cProMP] not in pkl")
 
     # -----------------------
-    # Plot overlay for one demo
+    # Plotting
     # -----------------------
     if args.plot:
+        # ---- overlay plot for one demo ----
         i = int(args.plot_demo)
         if not (0 <= i < D_phase):
             raise ValueError(f"--plot_demo must be within [0, {D_phase-1}]")
@@ -767,7 +1010,7 @@ def main():
                     vlines = {"phase0": 0, "cs": cs_idx, "ce": ce_idx, "phase1": y.shape[0] - 1}
                     break
 
-        # DMP open_loop for this demo (NEW: prototype or legacy)
+        # DMP open_loop for this demo (prototype or legacy)
         if int(sid) in lib.get("dmp", {}):
             dmp_entry = lib["dmp"][int(sid)]
             dmp_use = None
@@ -787,13 +1030,12 @@ def main():
                     pass
                 overlays.append(("DMP open_loop", dmp_open_loop_y6(dmp_use)))
 
-
         out_png = plot_dir / f"overlay_demo_{i:03d}_skill_{sid}.png"
         plot_overlay_6d(y=y, overlays=overlays, title=title, out_png=out_png, t=phase_grid, vlines=vlines)
         print(f"\n[plot] {out_png}")
 
         # -----------------------
-        # (NEW) Skill 1~8: ProMP prior means in one figure
+        # (A) Skill 1~8: ProMP prior means in one figure
         # -----------------------
         skill_means_prior: Dict[int, np.ndarray] = {}
         for sid2 in range(1, 9):
@@ -815,61 +1057,115 @@ def main():
             print("[plot] No ProMP prior means available for skills 1..8.")
 
         # -----------------------
-        # (NEW) Skill 1~8: cProMP representative means in one figure
+        # (B) Skill 1~8: per-skill demo mean ± std (separate figures)
         # -----------------------
-        skill_means_cond: Dict[int, np.ndarray] = {}
+        skill_demo_curves = collect_skill_demo_curves_1to8(
+            Y_all=Y_all,
+            ptrp=ptrp,
+            demo_skill=demo_skill,
+            min_len=min_len,
+        )
+        if len(skill_demo_curves) == 0:
+            print("[plot] No demo curves available for per-skill mean±std plots.")
+        else:
+            for sid2 in range(1, 9):
+                demos = skill_demo_curves.get(sid2, [])
+                if not demos:
+                    continue
+                out_pngk = plot_dir / f"skill_{sid2:02d}_demo_mean_std_xyz_w.png"
+                plot_skill_demo_mean_std_6d(
+                    sid=sid2,
+                    demos=demos,
+                    t=phase_grid,
+                    out_png=out_pngk,
+                    title_prefix="",
+                )
+                print(f"[plot] {out_pngk}")
+
+        # -----------------------
+        # (C) (NEW) Skill 1~8: ProMP prior mean ± conf (separate figures)
+        # -----------------------
+        for sid2 in range(1, 9):
+            if sid2 not in lib.get("promp", {}):
+                continue
+            entry = lib["promp"][sid2]
+            mu, conf = _extract_mean_conf_from_entry(
+                entry=entry,
+                mean_key="y_mean",
+                var_key="y_var",
+                T=phase_len,
+                D=6,
+            )
+            if mu is None:
+                continue
+            if conf is None:
+                # no conf stored -> skip silently
+                continue
+            out_pngc = plot_dir / f"skill_{sid2:02d}_promp_mean_conf_xyz_w.png"
+            plot_skill_mean_conf_6d(
+                sid=sid2,
+                t=phase_grid,
+                y_mean=mu,
+                y_conf=conf,
+                out_png=out_pngc,
+                title="ProMP prior: mean ± conf",
+            )
+            print(f"[plot] {out_pngc}")
+
+        # -----------------------
+        # (D) (NEW) Skill 1~8: cProMP conditioned mean ± conf (pick 1 representative demo per skill)
+        #     - representative demo index = rep-top5[0] if exists else first conditioned entry
+        # -----------------------
+        rep_top5_map = lib.get("rep_top5", {}) if isinstance(lib.get("rep_top5", {}), dict) else rep_top5_map
+
         for sid2 in range(1, 9):
             if sid2 not in lib.get("cpromp", {}):
                 continue
-            items = lib["cpromp"][sid2].get("conditioned_per_demo", [])
+            centry = lib["cpromp"][sid2]
+            items = centry.get("conditioned_per_demo", [])
             if not items:
                 continue
 
-            # pick representative demo:
-            # 1) rep-top5 rank #1 if exists in rep_top5_map
-            # 2) else median contact_len among items (needs contact_len stored)
-            rep_demo_idx: Optional[int] = None
-            rep = rep_top5_map.get(sid2, None)
-            if rep and len(rep.get("top5_demo_indices_phase", [])) > 0:
-                rep_demo_idx = int(rep["top5_demo_indices_phase"][0])
+            # choose representative demo for this skill
+            rep = rep_top5_map.get(int(sid2), {}) if isinstance(rep_top5_map, dict) else {}
+            rep_list = rep.get("top5_demo_indices_phase", []) if isinstance(rep, dict) else []
+            rep_demo = int(rep_list[0]) if (isinstance(rep_list, list) and len(rep_list) > 0) else None
 
-            y_rep: Optional[np.ndarray] = None
-            if rep_demo_idx is not None:
+            chosen = None
+            if rep_demo is not None:
                 for it in items:
-                    if int(it.get("demo_index_phase", -1)) == rep_demo_idx:
-                        y_rep = np.asarray(it["y_cmean"], dtype=np.float64)
+                    if int(it.get("demo_index_phase", -1)) == rep_demo:
+                        chosen = it
                         break
+            if chosen is None:
+                chosen = items[0]
 
-            if y_rep is None:
-                # fallback: choose closest-to-median contact_len
-                lens = []
-                for it in items:
-                    if "contact_len" in it:
-                        lens.append(float(it["contact_len"]))
-                    else:
-                        lens.append(np.nan)
-                lens_arr = np.asarray(lens, dtype=np.float64)
-                if np.all(np.isnan(lens_arr)):
-                    # last fallback: just take first
-                    y_rep = np.asarray(items[0]["y_cmean"], dtype=np.float64)
-                else:
-                    med = float(np.nanmedian(lens_arr))
-                    rep_i = int(np.nanargmin(np.abs(lens_arr - med)))
-                    y_rep = np.asarray(items[rep_i]["y_cmean"], dtype=np.float64)
+            # extract mean/conf from chosen conditioned item
+            mu = _as_TD(chosen.get("y_cmean", None), phase_len, 6)
 
-            skill_means_cond[sid2] = y_rep
+            if mu is None:
+                continue
 
-        if len(skill_means_cond) > 0:
-            out_png3 = plot_dir / "skills_01_to_08_cpromp_rep_mean_xyz_w.png"
-            plot_skill_means_1to8(
-                skill_means=skill_means_cond,
+            conf = None
+            if chosen.get("y_cvar", None) is not None:
+                v = _as_TD(chosen.get("y_cvar", None), phase_len, 6)
+                if v is not None:
+                    conf = 1.96 * np.sqrt(np.sqrt(v))
+
+            if conf is None:
+                continue
+
+            di = int(chosen.get("demo_index_phase", -1))
+            out_pngcc = plot_dir / f"skill_{sid2:02d}_cpromp_demo_{di:03d}_mean_conf_xyz_w.png"
+            plot_skill_mean_conf_6d(
+                sid=sid2,
                 t=phase_grid,
-                out_png=out_png3,
-                title="cProMP representative means for skills 1~8 (xyz + wx wy wz)",
+                y_mean=mu,
+                y_conf=np.abs(conf),
+                out_png=out_pngcc,
+                title=f"cProMP conditioned: mean ± conf (demo {di})",
             )
-            print(f"[plot] {out_png3}")
-        else:
-            print("[plot] No cProMP representative means available for skills 1..8.")
+            print(f"[plot] {out_pngcc}")
 
 
 if __name__ == "__main__":

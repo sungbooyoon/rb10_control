@@ -5,15 +5,9 @@
 (1) Train & save skill library (phase-aligned) into a PKL.
 
 Models:
-- dmp   : CartesianDMP per demo (train-only)
-- promp : ProMP per skill (prior)
-- cpromp: ProMP prior per skill + store conditioning metadata (contact start/end xyz indices)
-         (conditioning + RMSE/plot is handled in (2) evaluator)
-
-Key design:
-- Build skill->(Y_list, used, csce_list, per_demo_meta) via a common function.
-- Compute rep_top5 per skill FIRST (based on contact length median + stability).
-- Then train selected model (dmp/promp/cpromp) using FULL demos (NOT top5 only).
+- dmp   : CartesianDMP prototype per skill via mean weights (stored as one DMP per skill)
+- promp : ProMP per skill (prior) + store mean_trajectory + var_trajectory (diag)
+- cpromp: ProMP prior per skill + store conditioning metadata + store conditioned mean + variance (diag)
 
 NPZ required:
   - X_phase_crop (N,3)
@@ -68,7 +62,15 @@ def infer_demo_skill_ids_from_skill_id_crop(skill_id_crop: np.ndarray, ptr_crop:
 
 
 def infer_demo_skill_ids(npz: dict, ptr_crop: np.ndarray) -> np.ndarray:
+    # keep your preferred logic: skill_id_crop majority vote
+    if "demo_skill_id_crop" in npz:
+        demo_sid = np.asarray(npz["demo_skill_id_crop"]).astype(np.int64)
+        D = int(ptr_crop.shape[0] - 1)
+        if demo_sid.shape[0] != D:
+            raise ValueError(f"demo_skill_id_crop length {demo_sid.shape[0]} != D {D}")
+        return demo_sid
     return infer_demo_skill_ids_from_skill_id_crop(npz["skill_id_crop"], ptr_crop)
+
 
 # -----------------------------
 # Conditional ProMP (multiple via points)
@@ -174,7 +176,7 @@ def condition_promp_multiple_viapoints_xyz_start_end(
 # -----------------------------
 def resample(y: np.ndarray, Tnew: int) -> np.ndarray:
     y = np.asarray(y, dtype=np.float64)
-    Told = y.shape[0]
+    Told = int(y.shape[0])
     if Told == Tnew:
         return y
     x_old = np.linspace(0.0, 1.0, Told)
@@ -183,6 +185,50 @@ def resample(y: np.ndarray, Tnew: int) -> np.ndarray:
     for d in range(y.shape[1]):
         out[:, d] = np.interp(x_new, x_old, y[:, d])
     return out
+
+
+# -----------------------------
+# ProMP mean + variance extraction (robust)
+# -----------------------------
+def _as_diag_var(v: np.ndarray) -> np.ndarray:
+    """
+    Accepts:
+      - (T,D) already diag var
+      - (T,D,D) full cov -> take diag
+      - (D,) single time -> expand to (1,D)
+      - (D,D) -> (1,D) diag
+    Returns (T,D).
+    """
+    v = np.asarray(v, dtype=np.float64)
+    if v.ndim == 1:
+        return v.reshape(1, -1)
+    if v.ndim == 2:
+        # could be (T,D) or (D,D)
+        if v.shape[0] == v.shape[1]:
+            return np.diag(v).reshape(1, -1)
+        return v
+    if v.ndim == 3:
+        # (T,D,D)
+        return np.einsum("tii->ti", v)
+    raise ValueError(f"Unsupported var/cov shape: {v.shape}")
+
+
+def trajectory_mean_and_var(promp: ProMP, t: np.ndarray, mc_samples: int = 200) -> tuple[np.ndarray, np.ndarray | None]:
+    """
+    Returns:
+      y_mean: (T,D)
+      y_var : (T,D) diag variance if available, else None
+
+    Priority:
+      1) promp.var_trajectory(t) or promp.cov_trajectory(t) or promp.variance_trajectory(t)
+      2) promp.sample_trajectories(t, n_samples) -> sample variance
+      3) None
+    """
+    t = np.asarray(t, dtype=np.float64).reshape(-1)
+    y_mean = np.asarray(promp.mean_trajectory(t), dtype=np.float64)
+    y_var = np.asarray(promp.var_trajectory(t), dtype=np.float64) if hasattr(promp, "var_trajectory") else None
+    
+    return y_mean, y_var
 
 
 # -----------------------------
@@ -244,17 +290,8 @@ def fit_dmp_train_only(y: np.ndarray, dt: float, n_weights: int) -> dict:
 
     return {"model": dmp, "T": int(Tn), "exec_time": float(exec_time)}
 
-def _get_attr_any(obj, names: list[str]):
-    for n in names:
-        if hasattr(obj, n):
-            return getattr(obj, n), n
-    return None, None
-
 
 def extract_cartesian_dmp_weights(dmp: CartesianDMP) -> np.ndarray:
-    """
-    movement_primitives CartesianDMP weights getter (robust).
-    """
     if hasattr(dmp, "get_weights"):
         w = dmp.get_weights()
         return np.asarray(w, dtype=np.float64).copy()
@@ -262,23 +299,14 @@ def extract_cartesian_dmp_weights(dmp: CartesianDMP) -> np.ndarray:
 
 
 def set_cartesian_dmp_weights(dmp: CartesianDMP, w_new: np.ndarray) -> None:
-    """
-    movement_primitives CartesianDMP weights setter (robust).
-    """
     w_new = np.asarray(w_new, dtype=np.float64)
     if hasattr(dmp, "set_weights"):
-        # some implementations require contiguous float64
         dmp.set_weights(np.ascontiguousarray(w_new, dtype=np.float64))
         return
     raise RuntimeError("CartesianDMP has no set_weights().")
 
 
 def mean_y6_endpoints(Y_list: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Compute mean y0 and mean g in y6 space:
-      y6 = [x,y,z, rotvec]
-    Returns (y0_mean, g_mean) each (6,)
-    """
     y0s = []
     gs = []
     for y in Y_list:
@@ -291,9 +319,9 @@ def mean_y6_endpoints(Y_list: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]
 
 
 # -----------------------------
-# ProMP
+# ProMP fit (now includes variance)
 # -----------------------------
-def fit_promp(Y_list: list[np.ndarray], n_basis: int) -> dict:
+def fit_promp(Y_list: list[np.ndarray], n_basis: int, mc_var_samples: int = 200) -> dict:
     if len(Y_list) == 0:
         raise ValueError("Empty Y_list.")
 
@@ -311,14 +339,16 @@ def fit_promp(Y_list: list[np.ndarray], n_basis: int) -> dict:
     promp = ProMP(n_dims=D, n_weights_per_dim=n_basis)
     promp.imitate(Ts, Ys)
 
-    # convenience (optional)
-    y_mean = None
-    try:
-        y_mean = np.asarray(promp.mean_trajectory(t), dtype=np.float64)
-    except Exception:
-        y_mean = None
-
-    return {"model": promp, "T_common": int(T_common), "t": t, "y_mean": y_mean}
+    # mean + variance (diag if possible)
+    y_mean, y_var = trajectory_mean_and_var(promp, t, mc_samples=int(mc_var_samples))
+    return {
+        "model": promp,
+        "T_common": int(T_common),
+        "t": t,
+        "y_mean": np.asarray(y_mean, dtype=np.float64),
+        "y_var": None if y_var is None else np.asarray(y_var, dtype=np.float64),
+        "n_var_mc_samples": int(mc_var_samples),
+    }
 
 
 # -----------------------------
@@ -332,11 +362,6 @@ def get_contact_phase_indices_for_demo(
     pre_steps: int,
     post_steps: int,
 ) -> tuple[int, int]:
-    """
-    Returns (cs_idx, ce_idx) in PHASE timeline.
-    If per-demo crop indices exist, map crop-index -> phase-index by linear scaling.
-    Else fallback to (pre_steps, phase_len-1-post_steps).
-    """
     if ("contact_start_idx_crop" in data) and ("contact_end_idx_crop" in data):
         cs_all = np.asarray(data["contact_start_idx_crop"], dtype=np.int64).reshape(-1)
         ce_all = np.asarray(data["contact_end_idx_crop"], dtype=np.int64).reshape(-1)
@@ -374,13 +399,6 @@ def contact_length_from_xyz(y_demo: np.ndarray, cs_idx: int, ce_idx: int) -> flo
 
 
 def ee_stability_score(y_demo: np.ndarray, cs_idx: int, ce_idx: int) -> float:
-    """
-    Smaller is better.
-    Heuristic stability within contact interval:
-      - std of |Δpos|
-      - std of |Δrotvec|
-      + small mean terms to avoid degenerate cases
-    """
     y_demo = np.asarray(y_demo, dtype=np.float64)
     Tn = y_demo.shape[0]
     cs = int(np.clip(cs_idx, 0, Tn - 1))
@@ -408,12 +426,6 @@ def pick_rep_top5_for_skill(
     topk: int = 5,
     near_median_keep: int | None = None,
 ) -> dict:
-    """
-    Policy:
-      1) contact length L_i
-      2) keep demos closest to median length (default: keep min(n, max(2*topk, 10)))
-      3) among kept, select topk with lowest stability score
-    """
     assert len(Y_list) == len(used) == len(csce_list)
     n = len(used)
     if n == 0:
@@ -465,7 +477,7 @@ def filter_demos_by_index(
     drop_ids: list[int],
 ):
     drop_ids = sorted(set(int(i) for i in drop_ids))
-    D = ptr_phase.shape[0] - 1
+    D = int(ptr_phase.shape[0] - 1)
     keep = [i for i in range(D) if i not in drop_ids]
     if len(keep) == D:
         return X_phase, W_phase, ptr_phase, ptr_crop, demo_skill
@@ -512,18 +524,8 @@ def build_skill_demo_cache(
     pre_contact_steps: int,
     post_contact_steps: int,
 ) -> dict[int, dict]:
-    """
-    Returns:
-      cache[sid] = {
-        "Y_list": [np.ndarray(T,6), ...]    # phase-aligned demo trajectories
-        "used": [demo_index_phase, ...]
-        "csce_list": [(cs,ce), ...]
-        "per_demo": {demo_index_phase: {"cs":..., "ce":...}, ...}
-      }
-    """
     D = int(ptrp.shape[0] - 1)
 
-    # group indices by skill
     skill_to_demo_idxs: dict[int, list[int]] = {}
     for i in range(D):
         sid = int(demo_skill[i])
@@ -587,6 +589,7 @@ def main():
     # ProMP
     ap.add_argument("--promp_n_basis", type=int, default=25)
     ap.add_argument("--promp_min_demos", type=int, default=3)
+    ap.add_argument("--promp_mc_var_samples", type=int, default=200, help="MC samples if var_trajectory unavailable")
 
     # Contact -> phase mapping fallback
     ap.add_argument("--pre_contact_steps", type=int, default=10)
@@ -595,7 +598,6 @@ def main():
     # Conditional ProMP
     ap.add_argument("--cond_xyz_cov", type=float, default=1e-4)
     ap.add_argument("--cond_loose_cov_other", type=float, default=1e6)
-
 
     # Drop
     ap.add_argument("--drop_demos", type=int, nargs="*", default=[36, 57, 98, 202])
@@ -607,18 +609,17 @@ def main():
 
     data = np.load(npz_path, allow_pickle=True)
 
-    # Required keys
     required = ["X_phase_crop", "W_phase_crop", "demo_ptr_phase", "demo_ptr_crop"]
     for k in required:
         if k not in data:
             raise KeyError(f"NPZ must contain key: {k}")
     if ("skill_id_crop" not in data) and ("demo_skill_id_crop" not in data):
-        raise KeyError("NPZ must contain: skill_id_crop (preferred) or demo_skill_id_crop")
+        raise KeyError("NPZ must contain: skill_id_crop or demo_skill_id_crop")
 
-    Xp = np.asarray(data["X_phase_crop"], dtype=np.float64)      # (N,3)
-    Wp = np.asarray(data["W_phase_crop"], dtype=np.float64)      # (N,3)
-    ptrp = np.asarray(data["demo_ptr_phase"], dtype=np.int64)    # (D+1,)
-    ptrc = np.asarray(data["demo_ptr_crop"], dtype=np.int64)     # (D+1,)
+    Xp = np.asarray(data["X_phase_crop"], dtype=np.float64)
+    Wp = np.asarray(data["W_phase_crop"], dtype=np.float64)
+    ptrp = np.asarray(data["demo_ptr_phase"], dtype=np.int64)
+    ptrc = np.asarray(data["demo_ptr_crop"], dtype=np.int64)
 
     Dc_phase = int(ptrp.shape[0] - 1)
     Dc_crop = int(ptrc.shape[0] - 1)
@@ -635,9 +636,9 @@ def main():
         phase_len = int(ptrp[1] - ptrp[0])
         phase_grid = np.linspace(0.0, 1.0, phase_len, dtype=np.float64)
 
-    demo_skill = infer_demo_skill_ids_from_skill_id_crop(data["skill_id_crop"], ptrc)
+    demo_skill = infer_demo_skill_ids(data, ptrc)
 
-    # Drop demos early (keeps ptr structure consistent)
+    # Drop demos early
     if len(args.drop_demos) > 0:
         drop_set = sorted(set(int(i) for i in args.drop_demos))
         print(f"[info] Dropping demos: {drop_set}")
@@ -655,12 +656,11 @@ def main():
         )
         Dc_phase = int(ptrp.shape[0] - 1)
 
-    # Build 6D trajectory per step
     Y_all = np.concatenate([Xp, Wp], axis=1)  # (N,6)
     if Y_all.shape[1] != 6:
         raise ValueError(f"Expected 6D (xyz+rotvec), got {Y_all.shape}")
 
-    # ---------- Common cache (per skill demos) ----------
+    # ---------- Common cache ----------
     cache = build_skill_demo_cache(
         Y_all=Y_all,
         ptrp=ptrp,
@@ -673,17 +673,17 @@ def main():
         post_contact_steps=int(args.post_contact_steps),
     )
 
-    # Compute rep_top5 FIRST for all skills (based on full demos, not subset)
+    # rep_top5 FIRST
     rep_top5: dict[int, dict] = {}
     for sid, item in cache.items():
-        Y_list = item["Y_list"]
-        used = item["used"]
-        csce_list = item["csce_list"]
-
-        rep = pick_rep_top5_for_skill(Y_list=Y_list, used=used, csce_list=csce_list, topk=5)
+        rep = pick_rep_top5_for_skill(
+            Y_list=item["Y_list"],
+            used=item["used"],
+            csce_list=item["csce_list"],
+            topk=5
+        )
         rep_top5[int(sid)] = rep
 
-        # optional print
         if len(rep.get("top5_demo_indices_phase", [])) > 0:
             print(f"\n[rep-top5] skill {sid} | median_len={rep['median_contact_len']:.6g}")
             for rank, row in enumerate(rep["table"], start=1):
@@ -699,17 +699,11 @@ def main():
         "dmp": {},
         "promp": {},
         "cpromp": {},
-        "rep_top5": rep_top5,            # always stored
-        "per_demo_contact_phase": {},    # always stored (for evaluator)
+        "rep_top5": rep_top5,
+        "per_demo_contact_phase": {},
     }
-    stats = {
-        "dmp": {},
-        "promp": {},
-        "cpromp": {},
-        "rep_top5": {},
-    }
+    stats = {"dmp": {}, "promp": {}, "cpromp": {}, "rep_top5": {}}
 
-    # store per-demo contact indices per skill
     for sid, item in cache.items():
         library["per_demo_contact_phase"][int(sid)] = item["per_demo"]
 
@@ -717,34 +711,25 @@ def main():
         for sid, item in cache.items():
             Y_list = item["Y_list"]
             used = item["used"]
+            if len(Y_list) == 0:
+                continue
 
             lens = [y.shape[0] for y in Y_list]
             if len(set(lens)) != 1:
                 raise ValueError(f"[skill {sid}] phase length mismatch: {sorted(set(lens))}")
 
-
-            if len(Y_list) == 0:
-                continue
-
-            # ---- 1) Fit per-demo DMP and collect weights ----
             Ws = []
             exec_times = []
             Ts = []
 
             for y_demo in Y_list:
-                fit = fit_dmp_train_only(
-                    y=y_demo,
-                    dt=float(args.dt),
-                    n_weights=int(args.dmp_n_weights)
-                )
+                fit = fit_dmp_train_only(y=y_demo, dt=float(args.dt), n_weights=int(args.dmp_n_weights))
                 dmp_i = fit["model"]
                 w_i = extract_cartesian_dmp_weights(dmp_i)
-
                 Ws.append(w_i)
                 exec_times.append(float(fit["exec_time"]))
                 Ts.append(int(fit["T"]))
 
-            # sanity: all weight shapes must match
             w0 = Ws[0]
             for j, wj in enumerate(Ws[1:], start=1):
                 if wj.shape != w0.shape:
@@ -754,17 +739,9 @@ def main():
 
             W_mean = np.mean(np.stack(Ws, axis=0), axis=0)
 
-            # ---- 2) Build ONE prototype DMP and overwrite its weights with mean ----
-            # Use median exec_time for robustness (phase-aligned이면 보통 다 같음)
             exec_time_proto = float(np.median(np.array(exec_times, dtype=np.float64)))
-            dmp_proto = CartesianDMP(
-                execution_time=exec_time_proto,
-                dt=float(args.dt),
-                n_weights_per_dim=int(args.dmp_n_weights)
-            )
+            dmp_proto = CartesianDMP(execution_time=exec_time_proto, dt=float(args.dt), n_weights_per_dim=int(args.dmp_n_weights))
 
-            # Initialize internal fields by imitating ONE demo (or you could imitate mean trajectory)
-            # Then overwrite weights with W_mean.
             y_init = np.asarray(Y_list[0], dtype=np.float64)
             Tn = int(y_init.shape[0])
             T_sec = np.linspace(0.0, (Tn - 1) * float(args.dt), Tn, dtype=np.float64)
@@ -785,38 +762,28 @@ def main():
             if not ok:
                 raise RuntimeError("CartesianDMP imitate() signature mismatch for prototype DMP. Paste the traceback.")
 
-            # Overwrite weights with mean
             set_cartesian_dmp_weights(dmp_proto, W_mean)
-
-            # Optionally, store mean endpoints in metadata (execution uses y0,g at rollout time anyway)
             y0_mean, g_mean = mean_y6_endpoints(Y_list)
 
-            # ---- 3) Save ONE DMP per skill ----
             library["dmp"][int(sid)] = {
                 "skill_id": int(sid),
                 "dmp": dmp_proto,
                 "n_demos": int(len(Y_list)),
                 "used_demo_indices_phase": np.array(used, dtype=np.int32),
-
                 "n_weights": int(args.dmp_n_weights),
                 "dt": float(args.dt),
-
                 "exec_time_median": exec_time_proto,
                 "T_median": int(np.median(np.array(Ts, dtype=np.int64))),
-
-                # optional debugging / analysis
-                "mean_w": W_mean,           # you can delete if pkl becomes too big
-                "y0_mean_y6": y0_mean,      # optional
-                "g_mean_y6": g_mean,        # optional
+                "mean_w": W_mean,
+                "y0_mean_y6": y0_mean,
+                "g_mean_y6": g_mean,
                 "weight_shape": tuple(W_mean.shape),
             }
-
             stats["dmp"][int(sid)] = {
                 "n_demos": int(len(Y_list)),
                 "weight_shape": tuple(W_mean.shape),
                 "exec_time_median": float(exec_time_proto),
             }
-
 
     elif args.model == "promp":
         for sid, item in cache.items():
@@ -825,17 +792,26 @@ def main():
             if len(Y_list) < int(args.promp_min_demos):
                 continue
 
-            fit = fit_promp(Y_list=Y_list, n_basis=int(args.promp_n_basis))
+            fit = fit_promp(Y_list=Y_list, n_basis=int(args.promp_n_basis), mc_var_samples=int(args.promp_mc_var_samples))
+            y_mean = fit["y_mean"]
+            y_var = fit["y_var"]
+
             library["promp"][int(sid)] = {
                 "skill_id": int(sid),
                 "promp": fit["model"],
                 "T_common": int(fit["T_common"]),
                 "t": fit["t"],
-                "y_mean": fit["y_mean"],  # optional convenience
+                "y_mean": y_mean,
+                "y_var": y_var,   # (T,6) diag variance or None
+                "n_var_mc_samples": int(fit["n_var_mc_samples"]),
                 "n_basis": int(args.promp_n_basis),
                 "used_demo_indices_phase": np.array(used, dtype=np.int32),
             }
-            stats["promp"][int(sid)] = {"n_demos": int(len(used)), "T_common": int(fit["T_common"])}
+            stats["promp"][int(sid)] = {
+                "n_demos": int(len(used)),
+                "T_common": int(fit["T_common"]),
+                "has_y_var": bool(y_var is not None),
+            }
 
     elif args.model == "cpromp":
         for sid, item in cache.items():
@@ -845,11 +821,13 @@ def main():
             if len(Y_list) < int(args.promp_min_demos):
                 continue
 
-            # 1) prior ProMP 학습
-            fit = fit_promp(Y_list=Y_list, n_basis=int(args.promp_n_basis))
+            # 1) prior ProMP
+            fit = fit_promp(Y_list=Y_list, n_basis=int(args.promp_n_basis), mc_var_samples=int(args.promp_mc_var_samples))
             prior = fit["model"]
+            prior_y_mean = fit["y_mean"]
+            prior_y_var = fit["y_var"]
 
-            # 2) per-demo conditioning 결과를 여기서 "저장"
+            # 2) per-demo conditioning (store mean + var)
             conditioned_per_demo = []
             conditioning_debug = []
 
@@ -868,7 +846,7 @@ def main():
                     loose_cov_other=float(args.cond_loose_cov_other),
                 )
 
-                y_cmean = np.asarray(cpromp.mean_trajectory(phase_grid), dtype=np.float64)  # (T,6)
+                y_cmean, y_cvar = trajectory_mean_and_var(cpromp, phase_grid, mc_samples=int(args.promp_mc_var_samples))
 
                 conditioned_per_demo.append({
                     "demo_index_phase": int(di),
@@ -880,7 +858,11 @@ def main():
                     "y_end_xyz": y_end_xyz,
                     "cond_xyz_cov": float(args.cond_xyz_cov),
                     "cond_loose_cov_other": float(args.cond_loose_cov_other),
-                    "y_cmean": y_cmean,
+
+                    # conditioned traj stats
+                    "y_cmean": np.asarray(y_cmean, dtype=np.float64),          # (T,6)
+                    "y_cvar": None if y_cvar is None else np.asarray(y_cvar, dtype=np.float64),  # (T,6) diag var
+                    "n_var_mc_samples": int(args.promp_mc_var_samples),
                 })
                 conditioning_debug.append(dbg)
 
@@ -891,11 +873,13 @@ def main():
                 "prior_promp": prior,
                 "T_common": int(fit["T_common"]),
                 "t": fit["t"],
-                "y_mean": fit["y_mean"],  # optional convenience
+                "y_mean": np.asarray(prior_y_mean, dtype=np.float64),
+                "y_var": None if prior_y_var is None else np.asarray(prior_y_var, dtype=np.float64),
+                "n_var_mc_samples": int(fit["n_var_mc_samples"]),
                 "n_basis": int(args.promp_n_basis),
                 "used_demo_indices_phase": np.array(used, dtype=np.int32),
 
-                # conditioning saved (eval.py가 지금 찾는 키)
+                # conditioning saved
                 "pre_contact_steps": int(args.pre_contact_steps),
                 "post_contact_steps": int(args.post_contact_steps),
                 "cond_xyz_cov": float(args.cond_xyz_cov),
@@ -907,10 +891,10 @@ def main():
             stats["cpromp"][int(sid)] = {
                 "n_demos": int(len(used)),
                 "T_common": int(fit["T_common"]),
+                "prior_has_y_var": bool(prior_y_var is not None),
                 "used_via_points": bool(conditioning_debug[0].get("used_via_points", False)) if conditioning_debug else False,
                 "method": conditioning_debug[0].get("method", None) if conditioning_debug else None,
             }
-
 
     else:
         raise ValueError(f"Unknown model: {args.model}")
@@ -929,12 +913,13 @@ def main():
         "min_len": int(args.min_len),
 
         "phase_len": int(phase_len),
-        "phase_grid": phase_grid,  # store for evaluator convenience
+        "phase_grid": np.asarray(phase_grid, dtype=np.float64),
 
         "drop_demos": list(map(int, args.drop_demos)),
 
         "promp_n_basis": int(args.promp_n_basis),
         "promp_min_demos": int(args.promp_min_demos),
+        "promp_mc_var_samples": int(args.promp_mc_var_samples),
         "dmp_n_weights": int(args.dmp_n_weights),
 
         "pre_contact_steps": int(args.pre_contact_steps),
