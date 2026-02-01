@@ -186,6 +186,19 @@ def so3_log(R: np.ndarray) -> np.ndarray:
     w = np.array([w_hat[2, 1], w_hat[0, 2], w_hat[1, 0]], dtype=np.float64)
     return theta * w
 
+def quat_to_rotvec_abs(quat_local: np.ndarray) -> np.ndarray:
+    """
+    quat_local: (T,4) xyzw in local frame (should be unwrapped)
+    returns w_abs(t) = log(R_local(t)) in R^3
+    """
+    ql = np.asarray(quat_local, dtype=np.float64)
+    T = ql.shape[0]
+    w = np.zeros((T, 3), dtype=np.float64)
+    for t in range(T):
+        Rt = R_from_q(ql[t])
+        w[t] = so3_log(Rt)
+    return w
+
 
 def quat_to_rotvec_rel(quat_local: np.ndarray, ref_idx: int) -> np.ndarray:
     """
@@ -641,7 +654,7 @@ def main():
 
         # (B) rotvec w(t) = log(R_ref^T R_t), ref = chosen_idx
         #     (if chosen_idx invalid -> returns zeros)
-        w_full = quat_to_rotvec_rel(quat_l_u, ref_idx=chosen_idx)  # (T,3)
+        w_full = quat_to_rotvec_abs(quat_l_u)  # (T,3)
 
         # (C) mean over [chosen_idx .. chosen_idx+100)
         if chosen_idx >= 0:
@@ -867,7 +880,7 @@ def main():
             quat_l_u = unwrap_quat_signs(quat_l)
 
             # 2) rotvec (log map) relative to orientation at chosen
-            w = quat_to_rotvec_rel(quat_l_u, ref_idx=ci)  # (T,3)
+            w = quat_to_rotvec_abs(quat_l_u)  # (T,3)
 
             # 3) event-based phase resample
             pos_rs = resample_piecewise_timewarp_3seg(
