@@ -582,19 +582,46 @@ def main():
 
         # ---- DMP metrics ----
         if int(sid) in lib.get("dmp", {}):
-            dmp_items = lib["dmp"][int(sid)]
-            dmp_map = {int(it["demo_index_phase"]): it["dmp"] for it in dmp_items}
+            dmp_entry = lib["dmp"][int(sid)]
+
+            # NEW: handle both formats (backward compatible)
+            if isinstance(dmp_entry, list):
+                # old per-demo format (legacy)
+                dmp_map = {int(it["demo_index_phase"]): it["dmp"] for it in dmp_entry}
+                get_dmp_for_demo = lambda di: dmp_map.get(int(di), None)
+            elif isinstance(dmp_entry, dict):
+                # new prototype format (mean-w)
+                dmp_proto = dmp_entry.get("dmp", None)
+                if dmp_proto is None:
+                    print("[DMP] entry has no 'dmp' -> skip")
+                    get_dmp_for_demo = lambda di: None
+                else:
+                    get_dmp_for_demo = lambda di: dmp_proto
+            else:
+                print("[DMP] unexpected entry type -> skip")
+                get_dmp_for_demo = lambda di: None
 
             rmse_pos_all, rmse_rot_all, rmse_all_all = [], [], []
             rmse_pos_top, rmse_rot_top, rmse_all_top = [], [], []
 
+            # IMPORTANT:
+            # If your CartesianDMP open_loop length differs from demo length,
+            # rmse_pos_rot_all() already resamples yref to y length.
             for di in used:
-                if di not in dmp_map:
-                    continue
                 sp, ep = int(ptrp[di]), int(ptrp[di + 1])
                 y_demo = np.asarray(Y_all[sp:ep], dtype=np.float64)
 
-                y_hat = dmp_open_loop_y6(dmp_map[di])
+                dmp_use = get_dmp_for_demo(di)
+                if dmp_use is None:
+                    continue
+
+                # reset before rollout to avoid state carryover between demos
+                try:
+                    dmp_use.reset()
+                except Exception:
+                    pass
+
+                y_hat = dmp_open_loop_y6(dmp_use)
                 m = rmse_pos_rot_all(y_demo, y_hat)
 
                 rmse_pos_all.append(m["rmse_pos"])
@@ -624,6 +651,7 @@ def main():
             print(f"  all mean/med/max = {s_top_all['mean']:.6g}/{s_top_all['median']:.6g}/{s_top_all['max']:.6g}")
         else:
             print("[DMP] not in pkl")
+
 
         # ---- ProMP prior metrics ----
         if int(sid) in lib.get("promp", {}):
@@ -739,13 +767,26 @@ def main():
                     vlines = {"phase0": 0, "cs": cs_idx, "ce": ce_idx, "phase1": y.shape[0] - 1}
                     break
 
-        # DMP open_loop for this demo
+        # DMP open_loop for this demo (NEW: prototype or legacy)
         if int(sid) in lib.get("dmp", {}):
-            for it in lib["dmp"][int(sid)]:
-                if int(it["demo_index_phase"]) == i:
-                    dmp = it["dmp"]
-                    overlays.append(("DMP open_loop", dmp_open_loop_y6(dmp)))
-                    break
+            dmp_entry = lib["dmp"][int(sid)]
+            dmp_use = None
+
+            if isinstance(dmp_entry, dict):
+                dmp_use = dmp_entry.get("dmp", None)
+            elif isinstance(dmp_entry, list):
+                for it in dmp_entry:
+                    if int(it.get("demo_index_phase", -1)) == i:
+                        dmp_use = it.get("dmp", None)
+                        break
+
+            if dmp_use is not None:
+                try:
+                    dmp_use.reset()
+                except Exception:
+                    pass
+                overlays.append(("DMP open_loop", dmp_open_loop_y6(dmp_use)))
+
 
         out_png = plot_dir / f"overlay_demo_{i:03d}_skill_{sid}.png"
         plot_overlay_6d(y=y, overlays=overlays, title=title, out_png=out_png, t=phase_grid, vlines=vlines)

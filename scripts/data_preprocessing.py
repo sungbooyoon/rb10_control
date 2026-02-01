@@ -605,6 +605,11 @@ def main():
     debug_series = {}
     plot_set = set(args.plot_demo_indices)
 
+    # NEW: per-demo mean rotvec after chosen_idx (100 steps)
+    w_mean_100_list: list[np.ndarray] = []
+    w_mean_100_skill_list: list[int] = []   # demo-level skill id (majority vote)
+    w_mean_100_demo_list: list[int] = []    # demo index i
+
     for i in range(D):
         s, e = int(ptr[i]), int(ptr[i + 1])
         pos = X[s:e, 0:3].astype(np.float64)
@@ -627,6 +632,46 @@ def main():
         )
 
         pos_l, quat_l = transform_demo_to_local(pos, quat, origin, R_l2b)
+
+        # ----------------------------
+        # NEW: mean rotvec over first 100 steps after chosen_idx (in LOCAL frame)
+        # ----------------------------
+        # (A) unwrap quat signs within demo (local quat)
+        quat_l_u = unwrap_quat_signs(quat_l)
+
+        # (B) rotvec w(t) = log(R_ref^T R_t), ref = chosen_idx
+        #     (if chosen_idx invalid -> returns zeros)
+        w_full = quat_to_rotvec_rel(quat_l_u, ref_idx=chosen_idx)  # (T,3)
+
+        # (C) mean over [chosen_idx .. chosen_idx+100)
+        if chosen_idx >= 0:
+            Tdemo = w_full.shape[0]
+            win = 100  # <-- 너가 원하는 stable_len=100 고정
+            a0 = chosen_idx
+            a1 = min(Tdemo, chosen_idx + win)
+            if a1 > a0:
+                w_mean_100 = w_full[a0:a1].mean(axis=0)  # (3,)
+            else:
+                w_mean_100 = np.zeros((3,), dtype=np.float64)
+        else:
+            w_mean_100 = np.zeros((3,), dtype=np.float64)
+
+        # demo-level skill id (majority vote over that demo's timesteps)
+        if has_skill:
+            seg = np.asarray(skill_full[s:e]).reshape(-1)
+            if seg.size > 0:
+                vals, cnt = np.unique(seg, return_counts=True)
+                demo_skill_id = int(vals[np.argmax(cnt)])
+            else:
+                demo_skill_id = -1
+        else:
+            demo_skill_id = -1
+
+        w_mean_100_list.append(w_mean_100.astype(np.float64))
+        w_mean_100_skill_list.append(demo_skill_id)
+        w_mean_100_demo_list.append(i)
+
+
 
         # enforce z_local(chosen) == 0
         if chosen_idx >= 0:
@@ -846,6 +891,67 @@ def main():
 
     # save
     np.savez_compressed(out_path, **out)
+
+    # ----------------------------
+    # NEW: save & plot w_mean_100 grouped by skill
+    # ----------------------------
+    if len(w_mean_100_list) > 0:
+        Wm = np.stack(w_mean_100_list, axis=0)  # (D,3)
+        Sm = np.asarray(w_mean_100_skill_list, dtype=np.int64)  # (D,)
+        Im = np.asarray(w_mean_100_demo_list, dtype=np.int64)   # (D,)
+
+        out["w_mean_100_after_chosen"] = Wm.astype(np.float32)
+        out["w_mean_100_skill"] = Sm
+        out["w_mean_100_demo_index"] = Im
+
+        # ---- plotting (requires matplotlib) ----
+        import matplotlib.pyplot as plt
+
+        valid = Sm >= 0
+        if np.any(valid):
+            skills = sorted(np.unique(Sm[valid]).tolist())
+
+            # (1) boxplot per component
+            labels = ["wx", "wy", "wz"]
+            fig = plt.figure(figsize=(12, 10))
+
+            for k in range(3):
+                ax = plt.subplot(4, 1, k + 1)
+                data = [Wm[Sm == sid, k] for sid in skills]
+                ax.boxplot(data, labels=[str(sid) for sid in skills], showfliers=False)
+                ax.set_ylabel(f"mean {labels[k]} [rad]")
+                if k == 0:
+                    ax.set_title("Mean rotvec over first 100 steps after chosen_idx (per skill)")
+
+            # (2) norm boxplot (각도 크기)
+            ax = plt.subplot(4, 1, 4)
+            Wn = np.linalg.norm(Wm, axis=1)
+            data = [Wn[Sm == sid] for sid in skills]
+            ax.boxplot(data, labels=[str(sid) for sid in skills], showfliers=False)
+            ax.set_ylabel("||mean w|| [rad]")
+            ax.set_xlabel("skill id")
+
+            plt.tight_layout()
+            png_path = img_dir / "w_mean100_by_skill_boxplot.png"
+            plt.savefig(str(png_path))
+            plt.close(fig)
+            print(f"[plot] {png_path}")
+
+            # (optional) scatter: skill vs norm (quick glance)
+            fig = plt.figure(figsize=(12, 4))
+            x = Sm[valid].astype(np.float64)
+            y = np.linalg.norm(Wm[valid], axis=1)
+            plt.scatter(x, y, s=10)
+            plt.xlabel("skill id")
+            plt.ylabel("||mean w|| [rad]")
+            plt.title("Per-demo ||mean rotvec|| (first 100 steps after chosen_idx)")
+            plt.tight_layout()
+            png_path = img_dir / "w_mean100_norm_scatter.png"
+            plt.savefig(str(png_path))
+            plt.close(fig)
+            print(f"[plot] {png_path}")
+        else:
+            print("[warn] w_mean_100: no valid skill ids found (Sm < 0).")
 
     # ----------------------------
     # plots (optional)

@@ -244,6 +244,51 @@ def fit_dmp_train_only(y: np.ndarray, dt: float, n_weights: int) -> dict:
 
     return {"model": dmp, "T": int(Tn), "exec_time": float(exec_time)}
 
+def _get_attr_any(obj, names: list[str]):
+    for n in names:
+        if hasattr(obj, n):
+            return getattr(obj, n), n
+    return None, None
+
+
+def extract_cartesian_dmp_weights(dmp: CartesianDMP) -> np.ndarray:
+    """
+    movement_primitives CartesianDMP weights getter (robust).
+    """
+    if hasattr(dmp, "get_weights"):
+        w = dmp.get_weights()
+        return np.asarray(w, dtype=np.float64).copy()
+    raise RuntimeError("CartesianDMP has no get_weights().")
+
+
+def set_cartesian_dmp_weights(dmp: CartesianDMP, w_new: np.ndarray) -> None:
+    """
+    movement_primitives CartesianDMP weights setter (robust).
+    """
+    w_new = np.asarray(w_new, dtype=np.float64)
+    if hasattr(dmp, "set_weights"):
+        # some implementations require contiguous float64
+        dmp.set_weights(np.ascontiguousarray(w_new, dtype=np.float64))
+        return
+    raise RuntimeError("CartesianDMP has no set_weights().")
+
+
+def mean_y6_endpoints(Y_list: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute mean y0 and mean g in y6 space:
+      y6 = [x,y,z, rotvec]
+    Returns (y0_mean, g_mean) each (6,)
+    """
+    y0s = []
+    gs = []
+    for y in Y_list:
+        y = np.asarray(y, dtype=np.float64)
+        y0s.append(y[0])
+        gs.append(y[-1])
+    y0_mean = np.mean(np.stack(y0s, axis=0), axis=0)
+    g_mean = np.mean(np.stack(gs, axis=0), axis=0)
+    return y0_mean, g_mean
+
 
 # -----------------------------
 # ProMP
@@ -673,20 +718,105 @@ def main():
             Y_list = item["Y_list"]
             used = item["used"]
 
-            dmp_list = []
-            for y_demo, di in zip(Y_list, used):
-                fit = fit_dmp_train_only(y=y_demo, dt=float(args.dt), n_weights=int(args.dmp_n_weights))
-                dmp_list.append({
-                    "demo_index_phase": int(di),
-                    "dmp": fit["model"],
-                    "T": int(fit["T"]),
-                    "exec_time": float(fit["exec_time"]),
-                    "n_weights": int(args.dmp_n_weights),
-                })
+            lens = [y.shape[0] for y in Y_list]
+            if len(set(lens)) != 1:
+                raise ValueError(f"[skill {sid}] phase length mismatch: {sorted(set(lens))}")
 
-            if len(dmp_list) > 0:
-                library["dmp"][int(sid)] = dmp_list
-                stats["dmp"][int(sid)] = {"n_demos": int(len(dmp_list))}
+
+            if len(Y_list) == 0:
+                continue
+
+            # ---- 1) Fit per-demo DMP and collect weights ----
+            Ws = []
+            exec_times = []
+            Ts = []
+
+            for y_demo in Y_list:
+                fit = fit_dmp_train_only(
+                    y=y_demo,
+                    dt=float(args.dt),
+                    n_weights=int(args.dmp_n_weights)
+                )
+                dmp_i = fit["model"]
+                w_i = extract_cartesian_dmp_weights(dmp_i)
+
+                Ws.append(w_i)
+                exec_times.append(float(fit["exec_time"]))
+                Ts.append(int(fit["T"]))
+
+            # sanity: all weight shapes must match
+            w0 = Ws[0]
+            for j, wj in enumerate(Ws[1:], start=1):
+                if wj.shape != w0.shape:
+                    raise ValueError(
+                        f"[skill {sid}] weight shape mismatch: Ws[0].shape={w0.shape} vs Ws[{j}].shape={wj.shape}"
+                    )
+
+            W_mean = np.mean(np.stack(Ws, axis=0), axis=0)
+
+            # ---- 2) Build ONE prototype DMP and overwrite its weights with mean ----
+            # Use median exec_time for robustness (phase-aligned이면 보통 다 같음)
+            exec_time_proto = float(np.median(np.array(exec_times, dtype=np.float64)))
+            dmp_proto = CartesianDMP(
+                execution_time=exec_time_proto,
+                dt=float(args.dt),
+                n_weights_per_dim=int(args.dmp_n_weights)
+            )
+
+            # Initialize internal fields by imitating ONE demo (or you could imitate mean trajectory)
+            # Then overwrite weights with W_mean.
+            y_init = np.asarray(Y_list[0], dtype=np.float64)
+            Tn = int(y_init.shape[0])
+            T_sec = np.linspace(0.0, (Tn - 1) * float(args.dt), Tn, dtype=np.float64)
+            Y_pqs = y6_to_pqs(y_init)
+
+            ok = False
+            for call in (
+                lambda: dmp_proto.imitate(T_sec, Y_pqs),
+                lambda: dmp_proto.imitate(T=T_sec, Y=Y_pqs),
+                lambda: dmp_proto.imitate(T=T_sec, y=Y_pqs),
+            ):
+                try:
+                    call()
+                    ok = True
+                    break
+                except TypeError:
+                    continue
+            if not ok:
+                raise RuntimeError("CartesianDMP imitate() signature mismatch for prototype DMP. Paste the traceback.")
+
+            # Overwrite weights with mean
+            set_cartesian_dmp_weights(dmp_proto, W_mean)
+
+            # Optionally, store mean endpoints in metadata (execution uses y0,g at rollout time anyway)
+            y0_mean, g_mean = mean_y6_endpoints(Y_list)
+
+            # ---- 3) Save ONE DMP per skill ----
+            library["dmp"][int(sid)] = {
+                "skill_id": int(sid),
+                "dmp": dmp_proto,
+                "n_demos": int(len(Y_list)),
+                "used_demo_indices_phase": np.array(used, dtype=np.int32),
+
+                "n_weights": int(args.dmp_n_weights),
+                "dt": float(args.dt),
+
+                "exec_time_median": exec_time_proto,
+                "T_median": int(np.median(np.array(Ts, dtype=np.int64))),
+
+                # optional debugging / analysis
+                "mean_w": W_mean,           # you can delete if pkl becomes too big
+                "y0_mean_y6": y0_mean,      # optional
+                "g_mean_y6": g_mean,        # optional
+                "weight_shape": tuple(W_mean.shape),
+            }
+
+            stats["dmp"][int(sid)] = {
+                "n_demos": int(len(Y_list)),
+                "weight_shape": tuple(W_mean.shape),
+                "exec_time_median": float(exec_time_proto),
+            }
+
 
     elif args.model == "promp":
         for sid, item in cache.items():
