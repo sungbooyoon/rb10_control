@@ -1,18 +1,18 @@
 {
-    "algo_name": "bc",
+    "algo_name": "diffusion_policy",
     "experiment": {
-        "name": "test",
+        "name": "robosuite_diffusion_example",
         "validate": false,
         "logging": {
-            "terminal_output_to_txt": true,
-            "log_tb": false,
+            "terminal_output_to_txt": false,
+            "log_tb": true,
             "log_wandb": true,
-            "wandb_proj_name": "test"
+            "wandb_proj_name": "debug"
         },
         "save": {
             "enabled": true,
             "every_n_seconds": null,
-            "every_n_epochs": 50,
+            "every_n_epochs": 100,
             "epochs": [],
             "on_best_validation": false,
             "on_best_rollout_return": false,
@@ -23,7 +23,7 @@
         "env": null,
         "additional_envs": null,
         "render": false,
-        "render_video": false,
+        "render_video": true,
         "keep_all_videos": false,
         "video_skip": 5,
         "rollout": {
@@ -40,21 +40,21 @@
     "train": {
         "data": [
             {
-                "path": "/home/sungboo/ros2_ws/src/rb10_control/dataset/251017_kin_3.hdf5"
+                "path": "/home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5"
             }
         ],
-        "output_dir": "../bc_trained_models",
+        "output_dir": "/home/sungboo/rb10_control/robomimic/robomimic/../tests/tmp_model_dir",
         "normalize_weights_by_ds_size": false,
         "num_data_workers": 0,
-        "hdf5_cache_mode": "all",
+        "hdf5_cache_mode": "low_dim",
         "hdf5_use_swmr": true,
         "hdf5_load_next_obs": false,
         "hdf5_normalize_obs": false,
         "hdf5_filter_key": null,
         "hdf5_validation_filter_key": null,
-        "seq_length": 1,
+        "seq_length": 16,
         "pad_seq_length": true,
-        "frame_stack": 1,
+        "frame_stack": 2,
         "pad_frame_stack": true,
         "dataset_keys": [
             "actions",
@@ -79,104 +79,60 @@
     "algo": {
         "optim_params": {
             "policy": {
-                "optimizer_type": "adam",
+                "optimizer_type": "adamw",
                 "learning_rate": {
                     "initial": 0.0001,
                     "decay_factor": 0.1,
-                    "epoch_schedule": [],
-                    "scheduler_type": "multistep"
+                    "step_every_batch": true,
+                    "scheduler_type": "cosine",
+                    "num_cycles": 0.5,
+                    "warmup_steps": 500,
+                    "epoch_schedule": []
                 },
                 "regularization": {
-                    "L2": 0.0
+                    "L2": 1e-06
                 },
                 "num_train_batches": 100,
                 "num_epochs": 2000
             }
         },
-        "loss": {
-            "l2_weight": 1.0,
-            "l1_weight": 0.0,
-            "cos_weight": 0.0
+        "horizon": {
+            "observation_horizon": 2,
+            "action_horizon": 8,
+            "prediction_horizon": 16
         },
-        "actor_layer_dims": [
-            1024,
-            1024
-        ],
-        "gaussian": {
-            "enabled": false,
-            "fixed_std": false,
-            "init_std": 0.1,
-            "min_std": 0.01,
-            "std_activation": "softplus",
-            "low_noise_eval": true
-        },
-        "gmm": {
+        "unet": {
             "enabled": true,
-            "num_modes": 5,
-            "min_std": 0.0001,
-            "std_activation": "softplus",
-            "low_noise_eval": true
-        },
-        "vae": {
-            "enabled": false,
-            "latent_dim": 14,
-            "latent_clip": null,
-            "kl_weight": 1.0,
-            "decoder": {
-                "is_conditioned": true,
-                "reconstruction_sum_across_elements": false
-            },
-            "prior": {
-                "learn": false,
-                "is_conditioned": false,
-                "use_gmm": false,
-                "gmm_num_modes": 10,
-                "gmm_learn_weights": false,
-                "use_categorical": false,
-                "categorical_dim": 10,
-                "categorical_gumbel_softmax_hard": false,
-                "categorical_init_temp": 1.0,
-                "categorical_temp_anneal_step": 0.001,
-                "categorical_min_temp": 0.3
-            },
-            "encoder_layer_dims": [
-                300,
-                400
+            "diffusion_step_embed_dim": 256,
+            "down_dims": [
+                256,
+                512,
+                1024
             ],
-            "decoder_layer_dims": [
-                300,
-                400
-            ],
-            "prior_layer_dims": [
-                300,
-                400
-            ]
+            "kernel_size": 5,
+            "n_groups": 8
         },
-        "rnn": {
+        "ema": {
             "enabled": true,
-            "horizon": 10,
-            "hidden_dim": 400,
-            "rnn_type": "LSTM",
-            "num_layers": 2,
-            "open_loop": false,
-            "kwargs": {
-                "bidirectional": false
-            }
+            "power": 0.75
         },
-        "transformer": {
+        "ddpm": {
+            "enabled": true,
+            "num_train_timesteps": 100,
+            "num_inference_timesteps": 100,
+            "beta_schedule": "squaredcos_cap_v2",
+            "clip_sample": true,
+            "prediction_type": "epsilon"
+        },
+        "ddim": {
             "enabled": false,
-            "context_length": 10,
-            "embed_dim": 512,
-            "num_layers": 6,
-            "num_heads": 8,
-            "emb_dropout": 0.1,
-            "attn_dropout": 0.1,
-            "block_output_dropout": 0.1,
-            "sinusoidal_embedding": false,
-            "activation": "gelu",
-            "supervise_all_steps": false,
-            "nn_parameter_for_timesteps": true,
-            "pred_future_acs": false
+            "num_train_timesteps": 100,
+            "num_inference_timesteps": 10,
+            "beta_schedule": "squaredcos_cap_v2",
+            "clip_sample": true,
+            "set_alpha_to_one": true,
+            "steps_offset": 0,
+            "prediction_type": "epsilon"
         }
     },
     "observation": {
@@ -184,7 +140,8 @@
             "obs": {
                 "low_dim": [
                     "ee_pos",
-                    "ee_quat"
+                    "ee_quat",
+                    "joint_pos"
                 ],
                 "rgb": [
                     "rgb"
@@ -193,7 +150,11 @@
                 "scan": []
             },
             "goal": {
-                "low_dim": [],
+                "low_dim": [
+                    "seam_origin",
+                    "seam_rot6d",
+                    "seam_length"
+                ],
                 "rgb": [],
                 "depth": [],
                 "scan": []
@@ -209,10 +170,18 @@
             "rgb": {
                 "core_class": "VisualCore",
                 "core_kwargs": {
-                    "backbone_class": "R3MConv",
+                    "feature_dimension": 64,
+                    "backbone_class": "ResNet18Conv",
                     "backbone_kwargs": {
-                        "r3m_model_class": "resnet34",
-                        "freez": true
+                        "pretrained": false,
+                        "input_coord_conv": false
+                    },
+                    "pool_class": "SpatialSoftmax",
+                    "pool_kwargs": {
+                        "num_kp": 32,
+                        "learnable_temperature": false,
+                        "temperature": 1.0,
+                        "noise_std": 0.0
                     }
                 },
                 "obs_randomizer_class": null,
