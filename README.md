@@ -156,11 +156,13 @@ python3 /home/sungboo/rb10_control/scripts/data_preprocessing.py
 
 ## Discover styles
 python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py \
+  --npz /home/sungboo/rb10_control/dataset/demo_20260122.npz \
   --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
   --n_components 4 \
   --window_after_contact 100 \
   --report_vs_skill \
-  --rot_only
+  --rot_only \
+  --drop_demos [36, 57, 98, 202]
 
 <!-- python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py \
   --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
@@ -189,29 +191,37 @@ python /home/sungboo/rb10_control/scripts/rebuild_hdf5_preprocessed.py \
 python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
 
 # 6-2. ProMP modeling
-/home/sungboo/rb10_control/scripts/inspect_npz.py --npz /home/sungboo/rb10_control/dataset/demo_20260122_final.npz
+python3 /home/sungboo/rb10_control/scripts/inspect_npz.py --npz /home/sungboo/rb10_control/dataset/demo_20260122_final.npz
 
 python /home/sungboo/rb10_control/scripts/train.py \
+  --npz /home/sungboo/rb10_control/dataset/demo_20260122.npz \
   --model dmp \
-  --out /home/sungboo/rb10_control/dataset/dmp.pkl
+  --out /home/sungboo/rb10_control/dataset/dmp.pkl \
+  --drop_demos [36, 57, 98, 202]
 
 python /home/sungboo/rb10_control/scripts/train.py \
+  --npz /home/sungboo/rb10_control/dataset/demo_20260122.npz \
   --model promp \
-  --out /home/sungboo/rb10_control/dataset/promp.pkl
+  --out /home/sungboo/rb10_control/dataset/promp.pkl \
+  --drop_demos [36, 57, 98, 202]
 
 python /home/sungboo/rb10_control/scripts/train.py \
+  --npz /home/sungboo/rb10_control/dataset/demo_20260122.npz \
   --model cpromp \
-  --out /home/sungboo/rb10_control/dataset/cpromp.pkl
+  --out /home/sungboo/rb10_control/dataset/cpromp.pkl \
+  --drop_demos [36, 57, 98, 202]
 
 python3 /home/sungboo/rb10_control/scripts/train_spromp_multi.py \
+  --npz /home/sungboo/rb10_control/dataset/demo_20260122.npz \
   --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
   --out /home/sungboo/rb10_control/dataset/spromp_multi.pkl \
   --n_basis 25 --min_demos 5 --standardize_var
 
 python3 /home/sungboo/rb10_control/scripts/train_spromp_single.py \
-    --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
-    --out /home/sungboo/rb10_control/dataset/spromp_single.pkl \
-    --n_basis 25 --min_demos 5 --cov_mode pooled --ridge 1e-6 --cache_traj
+  --npz /home/sungboo/rb10_control/dataset/demo_20260122.npz \
+  --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+  --out /home/sungboo/rb10_control/dataset/spromp_single.pkl \
+  --n_basis 25 --min_demos 5 --cov_mode pooled --ridge 1e-6 --cache_traj
 
 # 7. Evalutation
 python /home/sungboo/rb10_control/scripts/eval.py \
@@ -232,9 +242,9 @@ python /home/sungboo/rb10_control/scripts/eval.py \
 python3 /home/sungboo/rb10_control/scripts/eval_spromp_multi.py \
   --pkl /home/sungboo/rb10_control/dataset/spromp_multi.pkl \
   --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
-  --plot --plot_dir /home/sungboo/rb10_control/images/spromp_eval_multi
+  --plot --plot_dir /home/sungboo/rb10_control/images/demo_20260122/spromp_multi
 
 python3 /home/sungboo/rb10_control/scripts/eval_spromp_single.py \
   --pkl /home/sungboo/rb10_control/dataset/spromp_single.pkl \
   --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
-  --plot --plot_dir /home/sungboo/rb10_control/images/spromp_eval_single
+  --plot --plot_dir /home/sungboo/rb10_control/images/demo_20260122/spromp_single

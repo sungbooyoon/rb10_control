@@ -2,15 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-eval_spromp.py (MODE A ONLY)
+eval_spromp.py (MODE A ONLY = OPTION-1)
+
+MODE A (OPTION-1):
+- Evaluate on the SAME demo set used for BGMM style assignment:
+    style_pkl["used_demo_indices_original"] (and corresponding "labels")
+- This gives "one RMSE per demo" and makes N comparable across models.
 
 Evaluate + plot style-conditioned ProMP (sProMP) on FULL PHASE trajectories.
 - Window-after-contact (L) is used ONLY for BGMM style assignment (already done in style_pkl),
   and is NOT used for evaluation or plotting.
 
 This script:
-- Loads spromp.pkl (trained style-conditioned ProMP library; expected to be trained on full phase).
-- Loads style_pkl (BGMM result) to get per-demo style labels and (optionally) drop_demos.
+- Loads spromp.pkl (style-conditioned ProMP library; expected trained on full phase).
+- Loads style_pkl (BGMM result) to get:
+    * used_demo_indices_original (ORIGINAL ids)
+    * labels (style id per used demo)
+    * optional drop_demos (not used for MODE A evaluation set; only reported)
 - Loads NPZ trajectories (phase-aligned) and evaluates per-style:
     * ProMP mean vs demos belonging to that style (FULL PHASE)
     * RMSE: pos / rot / all
@@ -19,21 +27,27 @@ This script:
     * style demo mean ± std (across demos in that style, FULL PHASE)
     * style ProMP mean ± conf (from saved y_var if present, FULL PHASE)
 
+NPZ subset handling (important):
+- BGMM indices are "ORIGINAL demo indices".
+- If NPZ is a filtered subset, it SHOULD contain:
+    kept_orig_demo_index : (D0,) mapping NPZ local demo idx -> ORIGINAL demo idx
+  If absent, assume local==original.
+
 Assumptions:
 - NPZ has: X_phase_crop (N,3), W_phase_crop (N,3), demo_ptr_phase (D+1,)
 - style_pkl (BGMM) has:
-    - labels for used demos, and mapping to original demo indices
-    - optional drop_demos (list of orig indices dropped during BGMM training)
+    - used_demo_indices_original : (N_used,)
+    - labels : (N_used,)
 - spromp.pkl has:
     - library: dict {style_id: entry}, each entry contains y_mean (T,6) and optional y_var (T,6)
     - source_npz path (optional; can override with --npz)
 
 Example:
   python3 eval_spromp.py \
-    --pkl /home/sungboo/rb10_control/dataset/spromp.pkl \
-    --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+    --pkl /home/sungboo/rb10_control/dataset/spromp_multi_exp3.pkl \
+    --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm_exp3.pkl \
     --plot \
-    --plot_dir /home/sungboo/rb10_control/images/spromp_eval_full
+    --plot_dir /home/sungboo/rb10_control/images/demo_20260122_exp3/spromp_multi_modeA
 """
 
 from __future__ import annotations
@@ -41,7 +55,7 @@ from __future__ import annotations
 import argparse
 import pickle
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -100,6 +114,7 @@ def summarize(vals: List[float]) -> Dict[str, float]:
         "n": int(x.size),
     }
 
+
 def summarize_mean_std(vals: List[float]) -> Dict[str, float]:
     x = np.asarray(vals, dtype=np.float64)
     if x.size == 0:
@@ -116,13 +131,12 @@ def plot_overlay_6d(
     y_mean: np.ndarray,     # (Tref,6) model mean
     title: str,
     out_png: Path,
-    t: Optional[np.ndarray] = None,
 ):
     y = np.asarray(y, dtype=np.float64)
     y_mean = np.asarray(y_mean, dtype=np.float64)
 
     Tn = int(y.shape[0])
-    tt = np.arange(Tn) if t is None else np.asarray(t, dtype=np.float64).reshape(-1)
+    t = np.linspace(0.0, 1.0, Tn, dtype=np.float64)
 
     if y_mean.shape[0] != Tn:
         y_mean = resample(y_mean, Tn)
@@ -131,14 +145,14 @@ def plot_overlay_6d(
     plt.figure(figsize=(12, 14))
     for k in range(6):
         ax = plt.subplot(6, 1, k + 1)
-        ax.plot(tt, y[:, k], label="demo")
-        ax.plot(tt, y_mean[:, k], label="style ProMP mean")
+        ax.plot(t, y[:, k], label="demo")
+        ax.plot(t, y_mean[:, k], label="style ProMP mean")
         ax.set_ylabel(labels[k])
         if k == 0:
             ax.set_title(title)
             ax.legend(loc="upper right", fontsize=9)
         if k == 5:
-            ax.set_xlabel("phase_idx" if t is None else "t (0..1)")
+            ax.set_xlabel("t (0..1)")
 
     plt.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -262,19 +276,14 @@ def _extract_style_table_from_spromp(sp: dict) -> Dict[int, dict]:
     return table
 
 
-def _build_orig_to_style_map(style_bgmm: dict) -> Dict[int, int]:
-    """
-    BGMM payload should have:
-      - used_demo_indices_original : (N_used,)
-      - labels : (N_used,)
-    """
+def _get_bgmm_used_and_labels(style_bgmm: dict) -> Tuple[np.ndarray, np.ndarray]:
     if "used_demo_indices_original" not in style_bgmm or "labels" not in style_bgmm:
         raise ValueError("style_pkl must contain used_demo_indices_original and labels.")
     used_orig = np.asarray(style_bgmm["used_demo_indices_original"], dtype=np.int64).reshape(-1)
     labels = np.asarray(style_bgmm["labels"], dtype=np.int64).reshape(-1)
     if used_orig.shape[0] != labels.shape[0]:
         raise ValueError("style_pkl: used_demo_indices_original and labels length mismatch.")
-    return {int(o): int(l) for o, l in zip(used_orig.tolist(), labels.tolist())}
+    return used_orig, labels
 
 
 def _get_drop_set(style_bgmm: dict) -> set:
@@ -284,33 +293,19 @@ def _get_drop_set(style_bgmm: dict) -> set:
     return set()
 
 
-def _extract_demo_full_phase(
+def _extract_demo_full_phase_local(
     Xp: np.ndarray,
     Wp: np.ndarray,
     ptrp: np.ndarray,
-    demo_orig: int,
+    demo_local: int,
 ) -> np.ndarray:
-    """Return y_full (T,6) for original demo index demo_orig."""
-    sp, ep = int(ptrp[demo_orig]), int(ptrp[demo_orig + 1])
+    """Return y_full (T,6) for NPZ LOCAL demo index demo_local."""
+    sp, ep = int(ptrp[demo_local]), int(ptrp[demo_local + 1])
     xyz = np.asarray(Xp[sp:ep], dtype=np.float64)
     rot = np.asarray(Wp[sp:ep], dtype=np.float64)
     if xyz.shape[0] != rot.shape[0]:
-        raise ValueError(f"X/W length mismatch for demo {demo_orig}: {xyz.shape[0]} vs {rot.shape[0]}")
+        raise ValueError(f"X/W length mismatch for demo_local {demo_local}: {xyz.shape[0]} vs {rot.shape[0]}")
     return np.concatenate([xyz, rot], axis=1)
-
-
-def _entry_time_grid(entry: dict, T_fallback: int) -> np.ndarray:
-    """
-    Prefer entry['t'] if present; else make linspace(0,1,T).
-    """
-    if isinstance(entry, dict) and ("t" in entry):
-        try:
-            t = np.asarray(entry["t"], dtype=np.float64).reshape(-1)
-            if t.size >= 2:
-                return t
-        except Exception:
-            pass
-    return np.linspace(0.0, 1.0, int(T_fallback), dtype=np.float64)
 
 
 # -----------------------------
@@ -324,13 +319,20 @@ def main():
 
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--plot_dir", default=None)
-    ap.add_argument("--plot_demo", type=int, default=None,
-                    help="Optional: ORIGINAL demo index to overlay. If not given, pick first used demo in each style.")
+    ap.add_argument(
+        "--plot_demo",
+        type=int,
+        default=None,
+        help="Optional: ORIGINAL demo index to overlay. Must be in BGMM used set AND present in this NPZ subset.",
+    )
 
     ap.add_argument("--min_len", type=int, default=10)
     ap.add_argument("--conf_scale", type=float, default=1.96)
-    ap.add_argument("--strict_T_match", action="store_true",
-                    help="If set, require y_mean length == T_phase. Otherwise resample y_mean/y_var to demo length.")
+    ap.add_argument(
+        "--strict_T_match",
+        action="store_true",
+        help="If set, require y_mean length == demo length; otherwise resample y_mean/y_var to demo length.",
+    )
     args = ap.parse_args()
 
     sp_path = Path(args.pkl)
@@ -339,8 +341,8 @@ def main():
     sp = _load_pickle(sp_path)
     style_bgmm = _load_pickle(style_path)
 
-    style_table = _extract_style_table_from_spromp(sp)      # style_id -> entry
-    orig_to_style = _build_orig_to_style_map(style_bgmm)    # orig_demo_idx -> style_id
+    style_table = _extract_style_table_from_spromp(sp)  # style_id -> entry
+    used_orig_all, labels_all = _get_bgmm_used_and_labels(style_bgmm)  # ORIGINAL ids + labels
     drop_set = _get_drop_set(style_bgmm)
 
     # NPZ path
@@ -361,39 +363,79 @@ def main():
     if D0 <= 0:
         raise ValueError("No demos in NPZ (demo_ptr_phase too short).")
 
-    # infer a nominal T_phase from demo_0
+    # nominal phase length
     T_phase_nom = int(ptrp[1] - ptrp[0])
     if T_phase_nom <= 1:
         raise ValueError(f"Bad nominal phase length T={T_phase_nom}")
 
-    kept_original = [i for i in range(D0) if i not in drop_set]
+    # local->orig mapping (NPZ subset support)
+    if "kept_orig_demo_index" in npz:
+        local_to_orig = np.asarray(npz["kept_orig_demo_index"], dtype=np.int64).reshape(-1)
+        if local_to_orig.shape[0] != D0:
+            raise ValueError(
+                f"NPZ kept_orig_demo_index length mismatch: {local_to_orig.shape[0]} vs D0={D0}"
+            )
+    else:
+        local_to_orig = np.arange(D0, dtype=np.int64)
+
+    # build orig->local map (keep FIRST occurrence if duplicates)
+    orig_to_local: Dict[int, int] = {}
+    for di in range(D0):
+        o = int(local_to_orig[di])
+        if o not in orig_to_local:
+            orig_to_local[o] = int(di)
+
+    # MODE A: evaluation demo set = BGMM used demos ∩ NPZ-present demos
+    used_pairs: List[Tuple[int, int]] = []  # (demo_local, style_id)
+    n_missing_in_npz = 0
+    n_style_not_in_model = 0
+    for o, sid in zip(used_orig_all.tolist(), labels_all.tolist()):
+        o = int(o)
+        sid = int(sid)
+        if o not in orig_to_local:
+            n_missing_in_npz += 1
+            continue
+        if sid not in style_table:
+            n_style_not_in_model += 1
+            continue
+        used_pairs.append((orig_to_local[o], sid))
+
+    used_pairs = list(used_pairs)
+    N_eval = len(used_pairs)
+
+    # group LOCAL demos by style
+    per_style_demos_local: Dict[int, List[int]] = {sid: [] for sid in style_table.keys()}
+    for di_local, sid in used_pairs:
+        per_style_demos_local[sid].append(int(di_local))
+
     print(f"[info] spromp.pkl: {sp_path}")
     print(f"[info] style_pkl: {style_path}")
     print(f"[info] npz: {npz_path}")
-    print(f"[info] demos original D0={D0}, drop={sorted(drop_set)}, kept={len(kept_original)}")
-    print(f"[info] nominal T_phase={T_phase_nom}")
+    print(f"[info] npz demos D0={D0}, nominal T_phase={T_phase_nom}")
     print(f"[info] styles_in_spromp={sorted(style_table.keys())}")
-    print(f"[info] eval mode: FULL_PHASE (window NOT used)")
+    print(f"[info] BGMM used demos (original) N_all={int(used_orig_all.size)} | labels N={int(labels_all.size)}")
+    if "kept_orig_demo_index" in npz:
+        o_min = int(np.min(local_to_orig)) if D0 > 0 else -1
+        o_max = int(np.max(local_to_orig)) if D0 > 0 else -1
+        print(f"[info] NPZ subset mapping present: kept_orig_demo_index (orig range in NPZ: {o_min}..{o_max})")
+    else:
+        print("[info] NPZ subset mapping NOT present: assuming local==original")
 
-    # group original demos by style (only those that are kept and appear in BGMM mapping)
-    per_style_demos_orig: Dict[int, List[int]] = {sid: [] for sid in style_table.keys()}
-    n_unlabeled = 0
-    for orig in kept_original:
-        sid = int(orig_to_style.get(int(orig), -1))
-        if sid in per_style_demos_orig:
-            per_style_demos_orig[sid].append(int(orig))
-        else:
-            n_unlabeled += 1
-
-    if n_unlabeled > 0:
-        print(f"[warn] {n_unlabeled} kept demos have no style label (or style not in spromp library) -> ignored")
+    print(f"[info] MODE A eval demo set = (BGMM used) ∩ (present in NPZ) ∩ (style in model)")
+    print(f"[info]   -> N_eval={N_eval}")
+    if n_missing_in_npz > 0:
+        print(f"[warn] {n_missing_in_npz} BGMM-used demos missing in this NPZ subset -> ignored")
+    if n_style_not_in_model > 0:
+        print(f"[warn] {n_style_not_in_model} BGMM-used demos have style not in spromp library -> ignored")
+    if len(drop_set) > 0:
+        print(f"[note] style_pkl drop_demos exists (len={len(drop_set)}), but MODE A does NOT use drop_demos to define eval set.")
 
     results: Dict[int, dict] = {}
-    # -----------------------
-    # Global RMSE accumulators (ALL used demos across ALL styles)
-    # -----------------------
-    g_pos, g_rot, g_all = [], [], []
 
+    # global accumulators (ALL used demos across ALL styles; one RMSE per demo)
+    g_pos: List[float] = []
+    g_rot: List[float] = []
+    g_all: List[float] = []
 
     for style_id in sorted(style_table.keys()):
         entry = style_table[style_id]
@@ -406,21 +448,21 @@ def main():
         y_var = entry.get("y_var", None)
         y_var = None if y_var is None else np.asarray(y_var, dtype=np.float64)
 
-        demos_orig = per_style_demos_orig.get(style_id, [])
-        if len(demos_orig) == 0:
-            print(f"\n[style {style_id}] no demos assigned -> skip")
+        demos_local = per_style_demos_local.get(style_id, [])
+        if len(demos_local) == 0:
+            print(f"\n[style {style_id}] no demos assigned (MODE A) -> skip")
             continue
 
-        rmse_pos, rmse_rot, rmse_all = [], [], []
+        rmse_pos: List[float] = []
+        rmse_rot: List[float] = []
+        rmse_all: List[float] = []
         demos_full: List[np.ndarray] = []
         used_demos_orig: List[int] = []
+        used_demos_local: List[int] = []
         drops: Dict[str, int] = {}
 
-        # time grid for plots (prefer entry['t'])
-        t_style = _entry_time_grid(entry, T_fallback=int(y_mean.shape[0]))
-
-        for orig in demos_orig:
-            y_full = _extract_demo_full_phase(Xp, Wp, ptrp, demo_orig=orig)
+        for di_local in demos_local:
+            y_full = _extract_demo_full_phase_local(Xp, Wp, ptrp, demo_local=di_local)
 
             if y_full.shape[0] < int(args.min_len):
                 drops["min_len"] = drops.get("min_len", 0) + 1
@@ -438,39 +480,40 @@ def main():
             rmse_rot.append(m["rmse_rot"])
             rmse_all.append(m["rmse_all"])
 
-            # accumulate global (only USED demos)
-            g_pos.extend(rmse_pos)
-            g_rot.extend(rmse_rot)
-            g_all.extend(rmse_all)
-
+            # global accumulators
+            g_pos.append(m["rmse_pos"])
+            g_rot.append(m["rmse_rot"])
+            g_all.append(m["rmse_all"])
 
             demos_full.append(y_full)
-            used_demos_orig.append(int(orig))
+            used_demos_local.append(int(di_local))
+            used_demos_orig.append(int(local_to_orig[di_local]))
 
         s_pos = summarize(rmse_pos)
         s_rot = summarize(rmse_rot)
         s_all = summarize(rmse_all)
 
         print(f"\n=== style {style_id} ===")
-        print(f"[assigned demos] {len(demos_orig)}  | [used] {s_all['n']}")
+        print(f"[assigned demos] {len(demos_local)}  | [used] {s_all['n']}")
         if drops:
             drops_sorted = sorted(drops.items(), key=lambda x: -x[1])
             msg = ", ".join([f"{k}:{v}" for k, v in drops_sorted])
             print(f"[dropped reasons] {msg}")
 
-        print("[ProMP RMSE] (FULL PHASE)")
+        print("[ProMP RMSE] (FULL PHASE, MODE A: 1 RMSE per demo)")
         print(f"  pos mean/med/max = {s_pos['mean']:.6g}/{s_pos['median']:.6g}/{s_pos['max']:.6g}")
         print(f"  rot mean/med/max = {s_rot['mean']:.6g}/{s_rot['median']:.6g}/{s_rot['max']:.6g}")
         print(f"  all mean/med/max = {s_all['mean']:.6g}/{s_all['median']:.6g}/{s_all['max']:.6g}")
 
         results[int(style_id)] = {
             "style_id": int(style_id),
-            "n_assigned": int(len(demos_orig)),
+            "n_assigned": int(len(demos_local)),
             "n_used": int(s_all["n"]),
             "drops": dict(drops),
             "rmse_pos": s_pos,
             "rmse_rot": s_rot,
             "rmse_all": s_all,
+            "used_demo_indices_local": used_demos_local,
             "used_demo_indices_original": used_demos_orig,
         }
 
@@ -478,31 +521,39 @@ def main():
         # plotting per-style (FULL PHASE)
         # -----------------------
         if args.plot and s_all["n"] > 0:
-            plot_dir = Path(args.plot_dir) if args.plot_dir is not None else Path("./spromp_eval_full_plots")
+            plot_dir = Path(args.plot_dir) if args.plot_dir is not None else Path("./spromp_eval_modeA_plots")
             plot_dir.mkdir(parents=True, exist_ok=True)
 
-            # choose overlay demo:
-            overlay_orig = None
-            if args.plot_demo is not None:
-                cand = int(args.plot_demo)
-                if cand in used_demos_orig:
-                    overlay_orig = cand
-            if overlay_orig is None:
-                overlay_orig = used_demos_orig[0]
+            # choose overlay demo (ORIGINAL id constraint)
+            overlay_local: Optional[int] = None
+            overlay_orig: Optional[int] = None
 
-            y_overlay = _extract_demo_full_phase(Xp, Wp, ptrp, demo_orig=overlay_orig)
+            if args.plot_demo is not None:
+                cand_orig = int(args.plot_demo)
+                if cand_orig in orig_to_local:
+                    cand_local = orig_to_local[cand_orig]
+                    # must be USED (after drops) in this style:
+                    if cand_local in used_demos_local:
+                        overlay_local = int(cand_local)
+                        overlay_orig = int(cand_orig)
+
+            if overlay_local is None:
+                overlay_local = used_demos_local[0]
+                overlay_orig = int(local_to_orig[overlay_local])
+
+            y_overlay = _extract_demo_full_phase_local(Xp, Wp, ptrp, demo_local=overlay_local)
 
             out1 = plot_dir / f"style_{style_id:02d}_overlay_demo_orig_{overlay_orig:03d}.png"
+            y_mean_ov = y_mean if y_mean.shape[0] == y_overlay.shape[0] else resample(y_mean, y_overlay.shape[0])
             plot_overlay_6d(
                 y=y_overlay,
-                y_mean=y_mean,
-                title=f"style {style_id} | demo_orig={overlay_orig} | FULL PHASE",
+                y_mean=y_mean_ov,
+                title=f"style {style_id} | demo_orig={overlay_orig} | FULL PHASE (MODE A)",
                 out_png=out1,
-                t=np.linspace(0.0, 1.0, y_overlay.shape[0], dtype=np.float64),
             )
             print(f"[plot] {out1}")
 
-            # demo mean ± std: need common T; resample demos to same length (use y_mean length as reference)
+            # demo mean ± std: resample demos to common T (use y_mean length)
             T_ref = int(y_mean.shape[0])
             demos_rs = [resample(d, T_ref) if d.shape[0] != T_ref else d for d in demos_full]
             out2 = plot_dir / f"style_{style_id:02d}_demo_mean_std_fullphase.png"
@@ -510,7 +561,7 @@ def main():
                 demos=demos_rs,
                 t=np.linspace(0.0, 1.0, T_ref, dtype=np.float64),
                 out_png=out2,
-                title=f"style {style_id}: demo mean ± std (FULL PHASE, resampled to T={T_ref})",
+                title=f"style {style_id}: demo mean ± std (FULL PHASE, MODE A, resampled to T={T_ref})",
             )
             print(f"[plot] {out2}")
 
@@ -522,12 +573,12 @@ def main():
                     y_mean=y_mean,
                     y_var=y_var,
                     out_png=out3,
-                    title=f"style {style_id}: ProMP mean ± {args.conf_scale}*std (FULL PHASE)",
+                    title=f"style {style_id}: ProMP mean ± {args.conf_scale}*std (FULL PHASE, MODE A)",
                     conf_scale=float(args.conf_scale),
                 )
                 print(f"[plot] {out3}")
 
-    # summary
+    # per-style summary
     print("\n[summary] styles evaluated:")
     for sid in sorted(results.keys()):
         r = results[sid]
@@ -536,9 +587,7 @@ def main():
             f"rmse_all mean/med/max={r['rmse_all']['mean']:.4g}/{r['rmse_all']['median']:.4g}/{r['rmse_all']['max']:.4g}"
         )
 
-    # -----------------------
-    # Global overall RMSE (ALL used demos across ALL styles)
-    # -----------------------
+    # global overall RMSE (ALL used demos across ALL styles)
     print("\n==============================")
     print("[GLOBAL RMSE over ALL used demos (all styles)]")
     print("==============================")
@@ -553,7 +602,13 @@ def main():
         print(f"  all mean±std = {s_all_g['mean']:.6g} ± {s_all_g['std']:.6g}")
     else:
         print("(no samples)")
-    
+
+    # extra sanity print: expected N_eval vs actual used count
+    used_total = int(sum(results[sid]["n_used"] for sid in results.keys()))
+    if used_total != N_eval:
+        print(f"[warn] Used count after per-demo dropping ({used_total}) != N_eval before drops ({N_eval}). "
+              f"This is expected if min_len/nonfinite/strict_T_match dropped some demos.")
+
 
 if __name__ == "__main__":
     main()

@@ -886,9 +886,9 @@ def main():
                 rmse_all_all.append(m["rmse_all"])
 
                 # accumulate global
-                g_dmp_pos.extend(rmse_pos_all)
-                g_dmp_rot.extend(rmse_rot_all)
-                g_dmp_all.extend(rmse_all_all)
+                g_dmp_pos.append(m["rmse_pos"])
+                g_dmp_rot.append(m["rmse_rot"])
+                g_dmp_all.append(m["rmse_all"])
 
 
                 if di in top5_set:
@@ -934,9 +934,9 @@ def main():
                     rmse_all_all.append(m["rmse_all"])
 
                     # accumulate global
-                    g_promp_pos.extend(rmse_pos_all)
-                    g_promp_rot.extend(rmse_rot_all)
-                    g_promp_all.extend(rmse_all_all)
+                    g_promp_pos.append(m["rmse_pos"])
+                    g_promp_rot.append(m["rmse_rot"])
+                    g_promp_all.append(m["rmse_all"])
 
                     if di in top5_set:
                         rmse_pos_top.append(m["rmse_pos"])
@@ -980,9 +980,9 @@ def main():
                 rmse_all_all.append(m["rmse_all"])
 
                 # accumulate global
-                g_cpromp_pos.extend(rmse_pos_all)
-                g_cpromp_rot.extend(rmse_rot_all)
-                g_cpromp_all.extend(rmse_all_all)
+                g_cpromp_pos.append(m["rmse_pos"])
+                g_cpromp_rot.append(m["rmse_rot"])
+                g_cpromp_all.append(m["rmse_all"])
 
                 if di in top5_set:
                     rmse_pos_top.append(m["rmse_pos"])

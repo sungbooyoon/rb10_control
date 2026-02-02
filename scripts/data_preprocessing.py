@@ -561,6 +561,9 @@ def main():
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--plot_demo_indices", type=int, nargs="*", default=[0, 2, 36, 208])
     ap.add_argument("--img_dir", default="/home/sungboo/rb10_control/images/demo_20260122/preprocessing")
+
+    ap.add_argument("--last_n_demos", type=int, default=0, help="Use only the last N demos (e.g., 72). Set <=0 to use all.")
+
     args = ap.parse_args()
 
     in_path = Path(args.in_npz)
@@ -623,7 +626,17 @@ def main():
     w_mean_100_skill_list: list[int] = []   # demo-level skill id (majority vote)
     w_mean_100_demo_list: list[int] = []    # demo index i
 
-    for i in range(D):
+    # ----------------------------
+    # Select demos to process
+    # ----------------------------
+    if args.last_n_demos is not None and int(args.last_n_demos) > 0:
+        n = int(args.last_n_demos)
+        start_i = max(0, D - n)
+        demo_indices = list(range(start_i, D))   # last n demos
+    else:
+        demo_indices = list(range(D))            # all demos
+
+    for i in demo_indices:
         s, e = int(ptr[i]), int(ptr[i + 1])
         pos = X[s:e, 0:3].astype(np.float64)
         quat = X[s:e, 3:7].astype(np.float64)
