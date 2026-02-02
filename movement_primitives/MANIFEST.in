@@ -1,3 +1,0 @@
-include movement_primitives/dmp_fast.pyx
-prune tmp/
-prune test/
