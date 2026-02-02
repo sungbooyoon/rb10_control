@@ -193,3 +193,9 @@ python /home/sungboo/rb10_control/scripts/eval.py \
   --plot --plot_demo 0 \
   --plot_dir /home/sungboo/rb10_control/images/demo_20260122/cpromp
 
+
+python /home/sungboo/rb10_control/scripts/rebuild_hdf5_preprocessed.py \
+  --npz  /home/sungboo/rb10_control/dataset/demo_20260122_final.npz \
+  --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5 \
+  --out  /home/sungboo/rb10_control/data/demo_20260122_xlocalcrop_actions_goal.hdf5 \
+  --overwrite

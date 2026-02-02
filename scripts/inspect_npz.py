@@ -5,7 +5,7 @@
 Inspect an .npz and guess which key stores skill labels.
 
 Usage:
-  python inspect_npz_keys.py --npz /home/sungboo/rb10_control/dataset/demo_20260122_final.npz
+  python inspect_npz.py --npz /home/sungboo/rb10_control/dataset/demo_20260122_final.npz
 """
 
 from __future__ import annotations
