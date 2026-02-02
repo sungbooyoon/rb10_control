@@ -55,6 +55,22 @@
   #04 demo= 189 | L=0.304171 | |L-med|=0.000268543 | stab=0.0028726 | cs=10 ce=189
   #05 demo=  39 | L=0.299895 | |L-med|=0.00454412 | stab=0.00292624 | cs=10 ce=189
 
+# Style clustering
+[info] demos (original): 216, dropped: [36, 57, 98, 202], kept: 212
+[info] used demos (after feature build): 212, dropped_in_build: 0
+[info] feature dim: 300
+[BGMM] n_components=4, active_clusters=4
+  cluster 00: n=55
+  cluster 01: n=72
+  cluster 02: n=45
+  cluster 03: n=40
+
+[report_vs_skill] cluster -> skill composition (top5 per cluster)
+  cluster 00: skill8:17, skill5:15, skill1:6, skill4:6, skill6:6
+  cluster 01: skill1:18, skill4:18, skill2:12, skill8:7, skill7:6
+  cluster 02: skill3:18, skill7:18, skill1:3, skill4:3, skill6:1
+  cluster 03: skill6:18, skill2:14, skill5:5, skill8:3
+
 # Results
 | Model      | Split   | pos (mean / med / max)   | rot (mean / med / max)   | all (mean / med / max)   |
 | ---------- | ------- | ------------------------ | ------------------------ | ------------------------ |
@@ -66,3 +82,24 @@
 |            | top5    | 0.0291 / 0.0290 / 0.0376 | 0.1320 / 0.1295 / 0.1616 | 0.0956 / 0.0932 / 0.1173 |
 
 
+
+
+[ProMP]  N=2916
+  pos mean±std = 0.0157891 ± 0.00945537
+  rot mean±std = 0.106099 ± 0.0512146
+  all mean±std = 0.0762228 ± 0.0360472
+
+[cProMP] N=2916
+  pos mean±std = 0.0869214 ± 0.152764
+  rot mean±std = 0.307138 ± 0.461326
+  all mean±std = 0.226612 ± 0.343031
+
+[sProMP-multi] N=6023
+  pos mean±std = 0.016738 ± 0.008908
+  rot mean±std = 0.101104 ± 0.043098
+  all mean±std = 0.0728409 ± 0.0302267
+
+[sProMP-single] N=6023
+  pos mean±std = 0.0167424 ± 0.00890965
+  rot mean±std = 0.101107 ± 0.0430957
+  all mean±std = 0.0728435 ± 0.0302254

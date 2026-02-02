@@ -135,6 +135,13 @@ def summarize(vals: List[float]) -> Dict[str, float]:
         return {"mean": np.nan, "median": np.nan, "max": np.nan}
     return {"mean": float(np.mean(x)), "median": float(np.median(x)), "max": float(np.max(x))}
 
+def summarize_mean_std(vals: List[float]) -> Dict[str, float]:
+    x = np.asarray(vals, dtype=np.float64)
+    if x.size == 0:
+        return {"mean": np.nan, "std": np.nan, "n": 0}
+    std = float(np.std(x, ddof=1)) if x.size >= 2 else 0.0
+    return {"mean": float(np.mean(x)), "std": std, "n": int(x.size)}
+
 
 def compute_within_between_variance(
     Y_all: np.ndarray,          # (N,6) concatenated
@@ -791,6 +798,13 @@ def main():
     print(f"[info] skills to eval (trained): {skills_eval}")
 
     # -----------------------
+    # Global RMSE accumulators (ALL demos across ALL skills)
+    # -----------------------
+    g_dmp_pos, g_dmp_rot, g_dmp_all = [], [], []
+    g_promp_pos, g_promp_rot, g_promp_all = [], [], []
+    g_cpromp_pos, g_cpromp_rot, g_cpromp_all = [], [], []
+
+    # -----------------------
     # Evaluate per skill
     # -----------------------
     for sid in skills_eval:
@@ -871,6 +885,12 @@ def main():
                 rmse_rot_all.append(m["rmse_rot"])
                 rmse_all_all.append(m["rmse_all"])
 
+                # accumulate global
+                g_dmp_pos.extend(rmse_pos_all)
+                g_dmp_rot.extend(rmse_rot_all)
+                g_dmp_all.extend(rmse_all_all)
+
+
                 if di in top5_set:
                     rmse_pos_top.append(m["rmse_pos"])
                     rmse_rot_top.append(m["rmse_rot"])
@@ -912,6 +932,12 @@ def main():
                     rmse_pos_all.append(m["rmse_pos"])
                     rmse_rot_all.append(m["rmse_rot"])
                     rmse_all_all.append(m["rmse_all"])
+
+                    # accumulate global
+                    g_promp_pos.extend(rmse_pos_all)
+                    g_promp_rot.extend(rmse_rot_all)
+                    g_promp_all.extend(rmse_all_all)
+
                     if di in top5_set:
                         rmse_pos_top.append(m["rmse_pos"])
                         rmse_rot_top.append(m["rmse_rot"])
@@ -952,6 +978,12 @@ def main():
                 rmse_pos_all.append(m["rmse_pos"])
                 rmse_rot_all.append(m["rmse_rot"])
                 rmse_all_all.append(m["rmse_all"])
+
+                # accumulate global
+                g_cpromp_pos.extend(rmse_pos_all)
+                g_cpromp_rot.extend(rmse_rot_all)
+                g_cpromp_all.extend(rmse_all_all)
+
                 if di in top5_set:
                     rmse_pos_top.append(m["rmse_pos"])
                     rmse_rot_top.append(m["rmse_rot"])
@@ -975,6 +1007,46 @@ def main():
             print(f"  all mean/med/max = {s_top_all['mean']:.6g}/{s_top_all['median']:.6g}/{s_top_all['max']:.6g}")
         else:
             print("[cProMP] not in pkl")
+
+    # -----------------------
+    # Global overall RMSE (ALL demos across ALL skills)
+    # -----------------------
+    print("\n==============================")
+    print("[GLOBAL RMSE over ALL demos (all skills)]")
+    print("==============================")
+
+    if len(g_dmp_all) > 0:
+        s_pos = summarize_mean_std(g_dmp_pos)
+        s_rot = summarize_mean_std(g_dmp_rot)
+        s_all = summarize_mean_std(g_dmp_all)
+        print(f"[DMP]    N={s_all['n']}")
+        print(f"  pos mean±std = {s_pos['mean']:.6g} ± {s_pos['std']:.6g}")
+        print(f"  rot mean±std = {s_rot['mean']:.6g} ± {s_rot['std']:.6g}")
+        print(f"  all mean±std = {s_all['mean']:.6g} ± {s_all['std']:.6g}")
+    else:
+        print("[DMP]    (no samples)")
+
+    if len(g_promp_all) > 0:
+        s_pos = summarize_mean_std(g_promp_pos)
+        s_rot = summarize_mean_std(g_promp_rot)
+        s_all = summarize_mean_std(g_promp_all)
+        print(f"[ProMP]  N={s_all['n']}")
+        print(f"  pos mean±std = {s_pos['mean']:.6g} ± {s_pos['std']:.6g}")
+        print(f"  rot mean±std = {s_rot['mean']:.6g} ± {s_rot['std']:.6g}")
+        print(f"  all mean±std = {s_all['mean']:.6g} ± {s_all['std']:.6g}")
+    else:
+        print("[ProMP]  (no samples)")
+
+    if len(g_cpromp_all) > 0:
+        s_pos = summarize_mean_std(g_cpromp_pos)
+        s_rot = summarize_mean_std(g_cpromp_rot)
+        s_all = summarize_mean_std(g_cpromp_all)
+        print(f"[cProMP] N={s_all['n']}")
+        print(f"  pos mean±std = {s_pos['mean']:.6g} ± {s_pos['std']:.6g}")
+        print(f"  rot mean±std = {s_rot['mean']:.6g} ± {s_rot['std']:.6g}")
+        print(f"  all mean±std = {s_all['mean']:.6g} ± {s_all['std']:.6g}")
+    else:
+        print("[cProMP] (no samples)")
 
     # -----------------------
     # Plotting

@@ -223,10 +223,8 @@ def main():
     ap.add_argument("--mc_var_samples", type=int, default=200)
 
     # training trajectory choice
-    ap.add_argument("--fit_window_from_bgmm", action="store_true",
-                    help="Fit ProMP on the SAME post-contact window used in BGMM (window_after_contact).")
-    ap.add_argument("--fit_full_phase", action="store_true",
-                    help="Force fit on full phase even if BGMM used a window. (default behavior)")
+    ap.add_argument("--fit_window_from_bgmm", action="store_true", help="Fit ProMP on the SAME post-contact window used in BGMM (window_after_contact).")
+    ap.add_argument("--fit_full_phase", action="store_true", help="Force fit on full phase even if BGMM used a window. (default behavior)")
 
     # if using window, how to handle short remainder (near end)
     ap.add_argument("--pad_short_window", action="store_true", help="If cs+L exceeds T, pad by repeating last frame to keep fixed length.")
@@ -234,6 +232,7 @@ def main():
 
     # optional: scale variance for nicer plotting (not affecting model)
     ap.add_argument("--standardize_var", action="store_true", help="If y_var exists, normalize it by per-dim median to stabilize scale in plots.")
+    
 
     args = ap.parse_args()
 

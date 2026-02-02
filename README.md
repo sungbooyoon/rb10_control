@@ -178,6 +178,13 @@ python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py \
   --report_vs_skill \
   --rot_only -->
 
+## hdf5의 기존 obs 대체, actions, goal 추가 (Robomimic용)
+python /home/sungboo/rb10_control/scripts/rebuild_hdf5_preprocessed.py \
+  --npz  /home/sungboo/rb10_control/dataset/demo_20260122_final.npz \
+  --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5 \
+  --out  /home/sungboo/rb10_control/data/demo_20260122_xlocalcrop_actions_goal.hdf5 \
+  --overwrite
+
 # 6-1. Robomimc training (Diffusion)
 python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
 
@@ -196,10 +203,15 @@ python /home/sungboo/rb10_control/scripts/train.py \
   --model cpromp \
   --out /home/sungboo/rb10_control/dataset/cpromp.pkl
 
-python3 /home/sungboo/rb10_control/scripts/train_spromp.py \
+python3 /home/sungboo/rb10_control/scripts/train_spromp_multi.py \
   --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
-  --out /home/sungboo/rb10_control/dataset/spromp.pkl \
+  --out /home/sungboo/rb10_control/dataset/spromp_multi.pkl \
   --n_basis 25 --min_demos 5 --standardize_var
+
+python3 /home/sungboo/rb10_control/scripts/train_spromp_single.py \
+    --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+    --out /home/sungboo/rb10_control/dataset/spromp_single.pkl \
+    --n_basis 25 --min_demos 5 --cov_mode pooled --ridge 1e-6 --cache_traj
 
 # 7. Evalutation
 python /home/sungboo/rb10_control/scripts/eval.py \
@@ -217,10 +229,12 @@ python /home/sungboo/rb10_control/scripts/eval.py \
   --plot --plot_demo 0 \
   --plot_dir /home/sungboo/rb10_control/images/demo_20260122/cpromp
 
+python3 /home/sungboo/rb10_control/scripts/eval_spromp_multi.py \
+  --pkl /home/sungboo/rb10_control/dataset/spromp_multi.pkl \
+  --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+  --plot --plot_dir /home/sungboo/rb10_control/images/spromp_eval_multi
 
-python /home/sungboo/rb10_control/scripts/rebuild_hdf5_preprocessed.py \
-  --npz  /home/sungboo/rb10_control/dataset/demo_20260122_final.npz \
-  --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5 \
-  --out  /home/sungboo/rb10_control/data/demo_20260122_xlocalcrop_actions_goal.hdf5 \
-  --overwrite
-
+python3 /home/sungboo/rb10_control/scripts/eval_spromp_single.py \
+  --pkl /home/sungboo/rb10_control/dataset/spromp_single.pkl \
+  --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+  --plot --plot_dir /home/sungboo/rb10_control/images/spromp_eval_single
