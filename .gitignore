@@ -207,3 +207,5 @@ AMENT_IGNORE
 
 dataset/
 data/
+
+robomimic/tests/
