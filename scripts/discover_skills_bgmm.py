@@ -4,30 +4,29 @@
 """
 discover_styles_bgmm.py
 
-BGMM clustering on phase-aligned demos (optionally rotation-only),
-with robust SO(3) relative-rotation features (NO NaNs).
+BGMM clustering on phase-aligned demos using post-contact window ONLY.
 
-Key features:
-- Use scipy Rotation to avoid NaNs for zero-rotvec
-- Optional windowing on phase timeline
-- Optional relative rotation features (R_ref^T R_t -> logmap rotvec)
-- Optional report vs. existing skill_id (confusion-like stats)
+Key points (fixed):
+- phase0 is crop start (NOT contact start) -> we do NOT support absolute phase windowing.
+- window is always defined by contact_start_idx mapped into phase timeline:
+    window = [contact_start_phase, contact_start_phase + L)
+- supports robust SO(3) relative-rotation features using scipy Rotation (NO NaNs).
+- drop_demos is handled correctly by mapping phase-demo index -> original demo index (kept_original).
+- avoids UnboundLocalError by always defining xyz_w/rot_w before use.
 
-NPZ expected keys (from your inspect_npz.py):
+NPZ expected keys:
 - X_phase_crop: (N_phase, 3)
 - W_phase_crop: (N_phase, 3)   # rotvec in local/task frame
 - demo_ptr_phase: (D+1,)
-Optional (for contact_start mapping):
-- crop_s: (D,), crop_e: (D,)
-- contact_start_idx: (D,) or first_contact_index: (D,) or stable_index: (D,) etc.
-- skill_id_crop: (N_crop,) and demo_ptr_crop: (D+1,) for report_vs_skill majority vote
 
-Example:
-  python3 discover_styles_bgmm.py \
-    --npz /home/sungboo/rb10_control/dataset/demo_20260122_final.npz \
-    --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
-    --standardize --n_components 8 \
-    --window 0 100 --use_relative --relative_ref contact_start --report_vs_skill
+For contact mapping (raw->crop->phase):
+- crop_s: (D,), crop_e: (D,)
+- contact_start_idx: (D,)  # raw index in original timeline
+- (optional) contact_end_idx: (D,)  # unused in this script
+
+For report_vs_skill:
+- skill_id_crop: (N_crop,)
+- demo_ptr_crop: (D+1,)
 """
 
 from __future__ import annotations
@@ -58,14 +57,16 @@ except Exception:
     R = None
 
 
+# -----------------------------
+# helpers
+# -----------------------------
 def _finite(x: np.ndarray) -> bool:
     return bool(np.all(np.isfinite(x)))
 
 
 def _rotvec_rel_scientific(rotvec: np.ndarray, ref_rotvec: np.ndarray) -> np.ndarray:
     """
-    Compute relative rotation rotvec_rel = log( R(ref)^T * R(rotvec) ).
-    Uses scipy Rotation (robust for zero rotvec).
+    rotvec_rel = log( R(ref)^T * R(t) ), robust for zero rotvec using scipy.
     """
     if not _HAS_SCIPY:
         raise RuntimeError("scipy is required for --use_relative. Install: pip install scipy")
@@ -86,16 +87,18 @@ def filter_phase_demos_by_index(
     drop_ids: List[int],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Drop demos by phase-demo index, rebuild concatenated arrays and new ptr.
-    Returns: Xp_new, Wp_new, ptrp_new, kept_demo_indices_original
+    Drop demos by phase-demo index (0..D-1), rebuild concatenated arrays and ptr.
+    Returns:
+      Xp_new, Wp_new, ptrp_new, kept_original
+    where kept_original maps new phase-demo index -> original demo index.
     """
     drop_ids = sorted(set(int(i) for i in drop_ids))
     D = int(ptr_phase.shape[0] - 1)
     keep = [i for i in range(D) if i not in drop_ids]
-    kept_demo_indices_original = np.asarray(keep, dtype=np.int64)
+    kept_original = np.asarray(keep, dtype=np.int64)
 
     if len(keep) == D:
-        return X_phase, W_phase, ptr_phase, kept_demo_indices_original
+        return X_phase, W_phase, ptr_phase, kept_original
 
     Xp_new, Wp_new = [], []
     ptrp_new = [0]
@@ -107,10 +110,14 @@ def filter_phase_demos_by_index(
 
     Xp_new = np.concatenate(Xp_new, axis=0) if Xp_new else np.zeros((0, 3), dtype=np.float64)
     Wp_new = np.concatenate(Wp_new, axis=0) if Wp_new else np.zeros((0, 3), dtype=np.float64)
-    return Xp_new, Wp_new, np.asarray(ptrp_new, dtype=np.int64), kept_demo_indices_original
+    return Xp_new, Wp_new, np.asarray(ptrp_new, dtype=np.int64), kept_original
 
 
 def infer_demo_skill_ids_from_skill_id_crop(skill_id_crop: np.ndarray, ptr_crop: np.ndarray) -> np.ndarray:
+    """
+    Majority vote per demo on cropped timeline.
+    Returns demo_sid: (D,) skill id per demo (original indexing).
+    """
     skill_id_crop = np.asarray(skill_id_crop).astype(np.int64)
     ptr_crop = np.asarray(ptr_crop).astype(np.int64)
     D = int(ptr_crop.shape[0] - 1)
@@ -131,48 +138,32 @@ def infer_demo_skill_ids_from_skill_id_crop(skill_id_crop: np.ndarray, ptr_crop:
     return demo_sid
 
 
-def _get_contact_start_phase_index(data: dict, demo_i: int, T_phase: int) -> Optional[int]:
+def _raw_to_phase_index(data: dict, demo_orig: int, raw_idx: int, T_phase: int) -> Optional[int]:
     """
-    Map a contact-start-like index to phase index [0..T_phase-1].
-
-    Uses (preferred):
-      - contact_start_idx (raw index in original demo timeline)
-      - else first_contact_index
-      - else stable_index
-      - else chosen_index
-    Requires crop_s/crop_e to map raw->crop, then crop->phase.
-
-    Returns None if not possible.
+    Map raw index in original timeline -> phase index [0..T_phase-1]
+    via crop_s/crop_e.
     """
     if "crop_s" not in data or "crop_e" not in data:
         return None
-
-    crop_s = int(np.asarray(data["crop_s"], dtype=np.int64).reshape(-1)[demo_i])
-    crop_e = int(np.asarray(data["crop_e"], dtype=np.int64).reshape(-1)[demo_i])
+    crop_s = int(np.asarray(data["crop_s"], dtype=np.int64).reshape(-1)[demo_orig])
+    crop_e = int(np.asarray(data["crop_e"], dtype=np.int64).reshape(-1)[demo_orig])
     crop_len = int(crop_e - crop_s)
     if crop_len <= 1:
         return None
 
-    # pick best available start index in raw timeline
-    cand_keys = ["contact_start_idx", "first_contact_index", "stable_index", "chosen_index"]
-    raw_idx = None
-    for k in cand_keys:
-        if k in data:
-            arr = np.asarray(data[k], dtype=np.int64).reshape(-1)
-            if demo_i < arr.shape[0]:
-                raw_idx = int(arr[demo_i])
-                break
-    if raw_idx is None:
-        return None
-
-    # raw->crop
-    crop_idx = raw_idx - crop_s
-    crop_idx = int(np.clip(crop_idx, 0, crop_len - 1))
-
-    # crop->phase
+    crop_idx = int(np.clip(raw_idx - crop_s, 0, crop_len - 1))
     phase_idx = int(np.round(crop_idx / (crop_len - 1) * (T_phase - 1)))
-    phase_idx = int(np.clip(phase_idx, 0, T_phase - 1))
-    return phase_idx
+    return int(np.clip(phase_idx, 0, T_phase - 1))
+
+
+def _get_contact_start_phase_index(data: dict, demo_orig: int, T_phase: int) -> Optional[int]:
+    """
+    contact_start_idx (raw) -> phase index.
+    """
+    if "contact_start_idx" not in data:
+        return None
+    cs_raw = int(np.asarray(data["contact_start_idx"], dtype=np.int64).reshape(-1)[demo_orig])
+    return _raw_to_phase_index(data, demo_orig, cs_raw, T_phase)
 
 
 def build_feature_matrix(
@@ -180,27 +171,32 @@ def build_feature_matrix(
     W_phase: np.ndarray,
     ptr_phase: np.ndarray,
     *,
+    kept_original: np.ndarray,
     use_xyz: bool,
     use_rot: bool,
-    window: Optional[Tuple[int, int]],
-    use_relative: bool,
-    relative_ref: str,
+    window_after_contact: int,
     min_len: int,
     data_npz: dict,
-    verbose_drop: bool = True,
+    use_relative: bool,
+    relative_ref: str,  # "contact_start" or "phase0"
+    debug_first: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[int, str]]:
     """
-    Build flattened feature matrix:
-      per demo -> slice window -> (T_window, D_feat) -> flatten
+    Build flattened feature matrix per demo:
+      - determine contact_start_phase
+      - window = [contact_start_phase, contact_start_phase + L)
+      - slice xyz/rot on that window
+      - (optional) convert rot to relative rotvec w.r.t ref
 
     Returns:
       X_flat: (N_used, D_flat)
-      used_demo_indices_phase: (N_used,) indices in post-drop ptr_phase indexing
-      dropped_reason: {demo_idx: reason}
+      used_demo_indices_phase: (N_used,) indices in post-drop phase-demo indexing
+      dropped_reason: {phase_demo_idx: reason}
     """
     X_phase = np.asarray(X_phase, dtype=np.float64)
     W_phase = np.asarray(W_phase, dtype=np.float64)
     ptr_phase = np.asarray(ptr_phase, dtype=np.int64)
+    kept_original = np.asarray(kept_original, dtype=np.int64)
 
     D = int(ptr_phase.shape[0] - 1)
     if D <= 0:
@@ -217,60 +213,70 @@ def build_feature_matrix(
     if T < min_len:
         raise ValueError(f"Phase length T={T} < min_len={min_len}")
 
-    w0, w1 = 0, T
-    if window is not None:
-        w0, w1 = int(window[0]), int(window[1])
-        w0 = max(0, min(T, w0))
-        w1 = max(0, min(T, w1))
-        if w1 <= w0:
-            raise ValueError(f"Bad --window {window}, after clamp -> [{w0},{w1})")
+    if (not use_xyz) and (not use_rot):
+        raise ValueError("At least one of use_xyz/use_rot must be enabled.")
+    if use_relative and (not use_rot):
+        raise ValueError("--use_relative requires rotation features (use_rot=True).")
+    if window_after_contact is None or int(window_after_contact) <= 0:
+        raise ValueError("--window_after_contact must be a positive integer.")
 
-    # feature dims
-    dims = 0
-    if use_xyz:
-        dims += 3
-    if use_rot:
-        dims += 3
-    if dims == 0:
-        raise ValueError("At least one of --use_xyz / --use_rot must be enabled.")
+    L = int(window_after_contact)
 
-    X_list = []
-    used = []
+    X_list: List[np.ndarray] = []
+    used: List[int] = []
     dropped_reason: Dict[int, str] = {}
 
     for i in range(D):
+        demo_orig = int(kept_original[i])  # phase-demo -> original-demo mapping
+
         sp, ep = int(ptr_phase[i]), int(ptr_phase[i + 1])
+        xyz_full = X_phase[sp:ep]  # (T,3)
+        rot_full = W_phase[sp:ep]  # (T,3)
 
-        xyz = X_phase[sp:ep]
-        rot = W_phase[sp:ep]
-
-        # window
-        xyz_w = xyz[w0:w1]
-        rot_w = rot[w0:w1]
-
-        if xyz_w.shape[0] < min_len or rot_w.shape[0] < min_len:
-            dropped_reason[i] = f"too_short_after_window(len={xyz_w.shape[0]})"
+        # contact start phase
+        cs = _get_contact_start_phase_index(data_npz, demo_orig, T_phase=T)
+        if cs is None:
+            dropped_reason[i] = "no_contact_start_idx_or_crop_map"
             continue
 
-        # relative rotation
-        if use_relative:
-            if not use_rot:
-                dropped_reason[i] = "use_relative_requires_use_rot"
-                continue
+        w0 = int(cs)
+        w1 = min(T, w0 + L)
+        if w1 <= w0:
+            dropped_reason[i] = f"bad_contact_window(cs={cs},L={L})"
+            continue
 
+        # slice window FIRST (avoid UnboundLocalError)
+        xyz_w = xyz_full[w0:w1]
+        rot_w = rot_full[w0:w1]
+
+        # length check
+        if (w1 - w0) < min_len:
+            dropped_reason[i] = f"too_short_after_contact_window(len={w1-w0})"
+            continue
+
+        # validate finite
+        if use_xyz and (not _finite(xyz_w)):
+            dropped_reason[i] = "xyz_nonfinite"
+            continue
+        if use_rot and (not _finite(rot_w)):
+            dropped_reason[i] = "rot_nonfinite"
+            continue
+
+        # relative rotation (computed on windowed rot)
+        if use_relative:
             if relative_ref == "contact_start":
-                ref_idx = _get_contact_start_phase_index(data_npz, i, T_phase=T)
-                if ref_idx is None:
-                    dropped_reason[i] = "no_contact_start_mapping_keys"
-                    continue
-                ref_rotvec = rot[ref_idx]  # use full-phase ref, not windowed
+                ref_idx = int(cs)  # phase index
+                ref_rotvec = rot_full[ref_idx]  # reference from full phase
             elif relative_ref == "phase0":
-                ref_rotvec = rot[0]
+                ref_rotvec = rot_full[0]
             else:
                 dropped_reason[i] = f"unknown_relative_ref({relative_ref})"
                 continue
 
-            # compute per-step relative rotvec in the window
+            if not (_finite(ref_rotvec) and _finite(rot_w)):
+                dropped_reason[i] = "nonfinite_before_relative"
+                continue
+
             rel = np.zeros_like(rot_w, dtype=np.float64)
             ok = True
             for t in range(rot_w.shape[0]):
@@ -280,37 +286,34 @@ def build_feature_matrix(
                     break
                 rel[t] = _rotvec_rel_scientific(rv, ref_rotvec)
 
-            if not ok or not _finite(rel):
+            if (not ok) or (not _finite(rel)):
                 dropped_reason[i] = "nonfinite_after_relative"
                 continue
             rot_w = rel
 
         # assemble features
-        feat_parts = []
+        parts: List[np.ndarray] = []
         if use_xyz:
-            if not _finite(xyz_w):
-                dropped_reason[i] = "xyz_nonfinite"
-                continue
-            feat_parts.append(xyz_w)
+            parts.append(xyz_w)
         if use_rot:
-            if not _finite(rot_w):
-                dropped_reason[i] = "rot_nonfinite"
-                continue
-            feat_parts.append(rot_w)
+            parts.append(rot_w)
 
-        y = np.concatenate(feat_parts, axis=1)  # (Tw, dims)
-        if not _finite(y):
-            dropped_reason[i] = "y_nonfinite"
+        feat = np.concatenate(parts, axis=1)  # (Tw, dims)
+        if not _finite(feat):
+            dropped_reason[i] = "feat_nonfinite"
             continue
 
-        X_list.append(y.reshape(-1))
+        X_list.append(feat.reshape(-1))
         used.append(i)
 
+        if debug_first and len(used) <= int(debug_first):
+            print(f"[debug] phase_demo={i} orig_demo={demo_orig} T={T} "
+                  f"contact_start_phase={cs} window=[{w0},{w1}) Tw={w1-w0}")
+
     if len(X_list) == 0:
-        # print a few reasons
-        if verbose_drop and dropped_reason:
-            print("[drop-reasons] (first 20)")
-            for k in sorted(dropped_reason.keys())[:20]:
+        if dropped_reason:
+            print("[drop-reasons] (first 30)")
+            for k in sorted(dropped_reason.keys())[:30]:
                 print(f"  demo {k}: {dropped_reason[k]}")
         raise ValueError("No demos remained after building features (all dropped).")
 
@@ -320,35 +323,35 @@ def build_feature_matrix(
 
 
 def _confusion_counts(labels: np.ndarray, demo_skill: np.ndarray, K: int) -> Dict[int, Dict[int, int]]:
-    out: Dict[int, Dict[int, int]] = {}
-    for k in range(K):
-        out[k] = {}
+    out: Dict[int, Dict[int, int]] = {k: {} for k in range(K)}
     for y, s in zip(labels.tolist(), demo_skill.tolist()):
         out.setdefault(int(y), {})
         out[int(y)][int(s)] = out[int(y)].get(int(s), 0) + 1
     return out
 
 
+# -----------------------------
+# main
+# -----------------------------
 def main():
     ap = argparse.ArgumentParser()
 
     ap.add_argument("--npz", default="/home/sungboo/rb10_control/dataset/demo_20260122_final.npz")
     ap.add_argument("--out", required=True)
 
-    # keep consistent with pipeline
     ap.add_argument("--drop_demos", type=int, nargs="*", default=[36, 57, 98, 202])
     ap.add_argument("--min_len", type=int, default=10)
 
-    # which signals to cluster on
+    # signals
     ap.add_argument("--use_xyz", action="store_true", help="Include xyz in feature.")
     ap.add_argument("--use_rot", action="store_true", help="Include rotvec in feature.")
     ap.add_argument("--rot_only", action="store_true", help="Shortcut: use_rot=True, use_xyz=False")
 
-    # window on phase indices [start, end)
-    ap.add_argument("--window", type=int, nargs=2, default=None, metavar=("START", "END"),
-                    help="Phase window [START, END). Example: --window 0 100")
+    # ONLY window option (post-contact)
+    ap.add_argument("--window_after_contact", type=int, required=True,
+                    help="Window length L on phase timeline starting at contact_start_phase: [cs, cs+L).")
 
-    # relative rotation options
+    # relative rotation
     ap.add_argument("--use_relative", action="store_true",
                     help="Use relative rotation logmap: log(R_ref^T R_t). Requires scipy.")
     ap.add_argument("--relative_ref", choices=["contact_start", "phase0"], default="contact_start")
@@ -366,6 +369,9 @@ def main():
     ap.add_argument("--standardize", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
 
+    ap.add_argument("--debug_first", type=int, default=0,
+                    help="Print debug for first N used demos (0 disables).")
+
     # report
     ap.add_argument("--report_vs_skill", action="store_true",
                     help="If skill_id_crop exists, print cluster->skill composition.")
@@ -381,6 +387,7 @@ def main():
         if k not in data:
             raise KeyError(f"NPZ must contain key: {k}")
 
+    # basic arrays
     Xp = np.asarray(data["X_phase_crop"], dtype=np.float64)
     Wp = np.asarray(data["W_phase_crop"], dtype=np.float64)
     ptrp = np.asarray(data["demo_ptr_phase"], dtype=np.int64)
@@ -402,24 +409,26 @@ def main():
         use_xyz = False
         use_rot = True
     if (not use_xyz) and (not use_rot):
-        # default to rot-only for your use case
+        # default: rot-only (your main use case)
         use_xyz = False
         use_rot = True
 
-    # build features
+    # Build features (post-contact window only)
     X_flat, used_demo_indices_phase, dropped_reason = build_feature_matrix(
         X_phase=Xp,
         W_phase=Wp,
         ptr_phase=ptrp,
+        kept_original=kept_original,
         use_xyz=use_xyz,
         use_rot=use_rot,
-        window=tuple(args.window) if args.window is not None else None,
-        use_relative=bool(args.use_relative),
-        relative_ref=str(args.relative_ref),
+        window_after_contact=int(args.window_after_contact),
         min_len=int(args.min_len),
         data_npz=data,
-        verbose_drop=True,
+        use_relative=bool(args.use_relative),
+        relative_ref=str(args.relative_ref),
+        debug_first=int(args.debug_first),
     )
+
     used_demo_indices_original = kept_original[used_demo_indices_phase]
 
     # standardize
@@ -429,7 +438,6 @@ def main():
         scaler = StandardScaler(with_mean=True, with_std=True)
         X_fit = scaler.fit_transform(X_flat)
 
-    # final guard
     if not np.all(np.isfinite(X_fit)):
         bad_rows = np.where(~np.isfinite(X_fit).all(axis=1))[0][:20]
         raise RuntimeError(f"Non-finite remained in X_fit. bad_rows(first20)={bad_rows.tolist()}")
@@ -460,6 +468,7 @@ def main():
     print(f"[info] demos (original): {D0}, dropped: {drop_demos}, kept: {len(kept_original)}")
     print(f"[info] used demos (after feature build): {X_fit.shape[0]}, dropped_in_build: {len(dropped_reason)}")
     print(f"[info] feature dim: {X_fit.shape[1]}")
+    print(f"[info] window_after_contact: {int(args.window_after_contact)}  (post-contact only)")
     print(f"[BGMM] n_components={K}, active_clusters={len(active)}")
     for k in active:
         print(f"  cluster {k:02d}: n={int(counts[k])}")
@@ -468,7 +477,6 @@ def main():
     report = None
     if args.report_vs_skill and ("skill_id_crop" in data) and ("demo_ptr_crop" in data):
         demo_skill = infer_demo_skill_ids_from_skill_id_crop(data["skill_id_crop"], data["demo_ptr_crop"])
-        # map to used original indices
         demo_skill_used = demo_skill[used_demo_indices_original]
         report = _confusion_counts(labels=labels, demo_skill=demo_skill_used, K=K)
 
@@ -479,16 +487,17 @@ def main():
             s = ", ".join([f"skill{sid}:{cnt}" for sid, cnt in items])
             print(f"  cluster {k:02d}: {s}")
 
-    # save pkl (so you can load scaler+bgmm later)
+    # save pkl
     payload = dict(
         source_npz=str(npz_path),
         drop_demos=drop_demos,
+        kept_original=kept_original,
         used_demo_indices_phase=used_demo_indices_phase,
         used_demo_indices_original=used_demo_indices_original,
 
         use_xyz=use_xyz,
         use_rot=use_rot,
-        window=None if args.window is None else [int(args.window[0]), int(args.window[1])],
+        window_after_contact=int(args.window_after_contact),
         use_relative=bool(args.use_relative),
         relative_ref=str(args.relative_ref),
 

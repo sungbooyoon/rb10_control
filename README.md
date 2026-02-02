@@ -154,6 +154,30 @@ python3 /home/sungboo/rb10_control/scripts/cluster_apriltag.py \
 ## Local frame으로 변환
 python3 /home/sungboo/rb10_control/scripts/data_preprocessing.py
 
+## Discover styles
+python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py \
+  --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+  --n_components 4 \
+  --window_after_contact 100 \
+  --report_vs_skill \
+  --rot_only
+
+<!-- python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py \
+  --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+  --standardize \
+  --n_components 8 \
+  --window_after_contact 30 \
+  --report_vs_skill \
+  --rot_only 
+
+python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py \
+  --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+  --standardize \
+  --n_components 8 \
+  --window_after_contact 20 \
+  --report_vs_skill \
+  --rot_only -->
+
 # 6-1. Robomimc training (Diffusion)
 python3 /home/sungboo/rb10_control/robomimic/examples/mine_train_diffusion.py --dataset /home/sungboo/rb10_control/data/demo_20260122_224+224.hdf5
 
@@ -172,10 +196,10 @@ python /home/sungboo/rb10_control/scripts/train.py \
   --model cpromp \
   --out /home/sungboo/rb10_control/dataset/cpromp.pkl
 
-## Skill discovery
-python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl
-python3 /home/sungboo/rb10_control/scripts/discover_skills_bgmm.py --out /home/sungboo/rb10_control/dataset/test_bgmm.pkl --standardize
-<!-- python3 /home/sungboo/rb10_control/scripts/discover_skills_hsmm.py --out /home/sungboo/rb10_control/dataset/test_hsmm.pkl --backend pyhsmm -->
+python3 /home/sungboo/rb10_control/scripts/train_spromp.py \
+  --style_pkl /home/sungboo/rb10_control/dataset/test_bgmm.pkl \
+  --out /home/sungboo/rb10_control/dataset/spromp.pkl \
+  --n_basis 25 --min_demos 5 --standardize_var
 
 # 7. Evalutation
 python /home/sungboo/rb10_control/scripts/eval.py \
@@ -199,3 +223,4 @@ python /home/sungboo/rb10_control/scripts/rebuild_hdf5_preprocessed.py \
   --hdf5 /home/sungboo/rb10_control/data/demo_20260122_224+224_final.hdf5 \
   --out  /home/sungboo/rb10_control/data/demo_20260122_xlocalcrop_actions_goal.hdf5 \
   --overwrite
+
