@@ -27,7 +27,7 @@ from rosidl_runtime_py.utilities import get_message
 
 import rclpy
 
-from scripts.rb10_controller_rbpodo import (
+from scripts.rbpodo_controller_movej import (
     RB10Controller,
     JOINT_NAMES,
 )

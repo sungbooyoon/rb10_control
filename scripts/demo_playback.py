@@ -26,7 +26,7 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 
 # Controller (make sure it's on PYTHONPATH)
-from scripts.rb10_controller_rbpodo import RB10Controller
+from scripts.rbpodo_controller_movej import RB10Controller
 
 DEFAULT_HZ = 30.0
 

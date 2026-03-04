@@ -18,7 +18,7 @@ import numpy as np
 import rclpy
 from tf_transformations import quaternion_from_euler, quaternion_multiply
 
-from scripts.rb10_controller_rbpodo_servoj import RB10Controller
+from scripts.rbpodo_controller_servoj import RB10Controller
 
 
 def _normalize_quat(q: np.ndarray) -> np.ndarray:
