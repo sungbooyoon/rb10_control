@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from scripts.rb10_controller_rbpodo import RB10Controller
+from scripts.rb10_controller_rbpodo_servoj import RB10Controller
 from fake_spacemouse_agent import FakeSpacemouseAgent
 import time, threading, numpy as np
 from tf_transformations import quaternion_from_euler, quaternion_multiply
@@ -64,7 +64,7 @@ class TeleopRunner:
 
             q = self.ctrl.compute_target_qpos_from_pose(pos_tgt, quat_tgt, enforce_guard=self.enforce_guard)
             if q is not None:
-                self.ctrl.publish_qpos(q.tolist(), duration=self.traj_duration)
+                self.ctrl.publish_qpos(q.tolist())
 
             dt = self.period - (time.time() - t0)
             if dt > 0: time.sleep(dt)
