@@ -32,11 +32,11 @@ def _normalize_quat(q: np.ndarray) -> np.ndarray:
 
 
 class RB10ServoJPoseTopicController(RB10Controller):
-    def __init__(self) -> None:
+    def __init__(self, control_hz: float = 30.0, enforce_guard: bool = True) -> None:
         super().__init__()
 
-        self.declare_parameter("control_hz", 30.0)
-        self.declare_parameter("enforce_guard", True)
+        self.declare_parameter("control_hz", float(control_hz))
+        self.declare_parameter("enforce_guard", bool(enforce_guard))
 
         self._hz = float(self.get_parameter("control_hz").value)
         self._enforce_guard = bool(self.get_parameter("enforce_guard").value)
@@ -50,6 +50,14 @@ class RB10ServoJPoseTopicController(RB10Controller):
         self.create_service(Trigger, "~/hold_current", self._hold_current_cb)
         self._timer = self.create_timer(1.0 / self._hz, self._on_timer)
         self.get_logger().info(f"Pose-topic servo-j controller started (hz={self._hz:.1f})")
+
+    def get_loop_stats(self) -> dict:
+        return {
+            "control_hz": float(self._hz),
+            "recv_count": int(self._recv_count),
+            "ctrl_count": int(self._ctrl_count),
+            "has_target": bool(self._target_pos is not None and self._target_quat is not None),
+        }
 
     def _target_pose_cb(self, msg: PoseStamped) -> None:
         self._target_pos = np.array(
