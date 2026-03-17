@@ -1,17 +1,11 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""Backward-compatible script wrapper for the importable rb10_control module."""
+"""Import-friendly RB10 control helpers.
 
-from __future__ import annotations
+Usage:
+    from rb10_control import RB10Controller
+    from rb10_control import JOINT_NAMES
+"""
 
-import sys
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from rb10_control.joint_trajectory_controller import (  # noqa: E402
+from .joint_trajectory_controller import (
     ACTIVE_LINKS_MASK,
     BASE_LINK,
     DEBUG,
@@ -42,7 +36,3 @@ __all__ = [
     "URDF_PATH",
     "main",
 ]
-
-
-if __name__ == "__main__":
-    main()

@@ -20,7 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-			# ex_servo_spacenav = rb10_control.ex_servo_spacenav:main',
+            'rb10_controller = rb10_control.joint_trajectory_controller:main',
         ],
     },
 	# scripts=['scripts/test_pub.py', 'scripts/quick_check.py'],
