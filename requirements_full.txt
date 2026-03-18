@@ -1,7 +1,22 @@
 absl-py==2.3.1
+ackermann-msgs==2.0.2
+action-msgs==2.0.3
+action-tutorials-interfaces==0.33.7
 action-tutorials-py==0.33.7
 actionlib-msgs==5.3.6
 actuator-msgs==0.0.1
+ament-cmake-test==2.5.4
+ament-copyright==0.17.3
+ament-cppcheck==0.17.3
+ament-cpplint==0.17.3
+ament-flake8==0.17.3
+ament-index-python==1.8.1
+ament-lint==0.17.3
+ament-lint-cmake==0.17.3
+ament-package==0.16.4
+ament-pep257==0.17.3
+ament-uncrustify==0.17.3
+ament-xmllint==0.17.3
 angles==1.16.1
 annotated-types==0.7.0
 ansitable==0.11.4
@@ -19,6 +34,7 @@ beautifulsoup4==4.12.3
 blinker==1.7.0
 bloom==0.13.0
 Brotli==1.1.0
+builtin-interfaces==2.0.3
 catkin-pkg==1.1.0
 certifi==2023.11.17
 cffi==2.0.0
@@ -64,8 +80,10 @@ colcon-zsh==0.5.0
 colorama==0.4.6
 colored==2.3.1
 colorlog==6.9.0
+composition-interfaces==2.0.3
 configobj==5.0.8
 contourpy==1.0.7
+control-msgs==5.5.0
 controller-manager==4.39.2
 controller-manager-msgs==4.39.2
 coverage==6.5.0
@@ -80,6 +98,7 @@ dbus-python==1.3.2
 decorator==5.1.1
 demo-nodes-py==0.33.7
 Deprecated==1.2.14
+diagnostic-msgs==5.3.6
 diagnostic-updater==4.2.6
 diffusers==0.11.1
 distlib==0.3.8
@@ -88,6 +107,7 @@ docutils==0.20.1
 domain-coordinator==0.12.0
 dulwich==0.21.6
 # Editable install with no version control (easy-handeye2==0.5.0)
+-e /home/sungboo/ros2_ws/build/easy_handeye2
 easy-handeye2-msgs==0.5.0
 easyhid==0.0.10
 egl_probe==1.0.2
@@ -121,6 +141,7 @@ fsspec==2025.9.0
 future==1.0.0
 gdown==5.2.0
 generate-parameter-library-py==0.5.0
+geometry-msgs==5.3.6
 gitdb==4.0.12
 GitPython==3.1.45
 gps-msgs==2.1.1
@@ -167,6 +188,7 @@ lazr.restfulclient==0.14.6
 lazr.uri==1.0.6
 libcoal==3.0.2
 libpinocchio==3.8.0
+lifecycle-msgs==2.0.3
 llvmlite==0.46.0
 logging-demo==0.33.7
 loop-rate-limiters==1.2.0
@@ -193,6 +215,7 @@ moveit-msgs==2.6.0
 movement_primitives==0.9.1
 mpi4py==3.1.5
 mpmath==1.3.0
+nav-msgs==5.3.6
 netaddr==0.8.0
 networkx==3.6.1
 nodeenv==1.9.1
@@ -289,13 +312,21 @@ qt-gui-py-common==2.7.5
 quality-of-service-demo-py==0.33.7
 rbpodo==0.16.9
 rbpodo-msgs==0.0.0
+rcl-interfaces==2.0.3
+rclpy==7.1.6
+rcutils==6.7.4
 realsense2-camera-msgs==4.56.4
 regex==2025.9.18
 requests==2.31.0
 resource-retriever==3.4.4
 rich==13.7.1
+rmw-dds-common==3.1.0
 roboticstoolbox-python==1.1.1
 roman==3.3
+ros-gz-bridge==1.0.16
+ros-gz-interfaces==1.0.16
+ros-gz-sim==1.0.16
+ros-image-to-qimage==0.4.1
 ros2action==0.32.6
 ros2bag==0.26.9
 ros2bag-mcap-cli==0.26.9
@@ -320,6 +351,22 @@ rosbags==0.11.0
 rosdep==0.26.0
 rosdistro==1.0.1
 rosgraph-msgs==2.0.3
+rosidl-adapter==4.6.6
+rosidl-cli==4.6.6
+rosidl-cmake==4.6.6
+rosidl-generator-c==4.6.6
+rosidl-generator-cpp==4.6.6
+rosidl-generator-py==0.22.2
+rosidl-generator-type-description==4.6.6
+rosidl-parser==4.6.6
+rosidl-pycommon==4.6.6
+rosidl-runtime-py==0.13.1
+rosidl-typesupport-c==3.2.2
+rosidl-typesupport-cpp==3.2.2
+rosidl-typesupport-fastrtps-c==3.6.2
+rosidl-typesupport-fastrtps-cpp==3.6.2
+rosidl-typesupport-introspection-c==4.6.6
+rosidl-typesupport-introspection-cpp==4.6.6
 rospkg==1.6.0
 rpyutils==0.4.2
 rqt==1.6.3
@@ -357,8 +404,12 @@ safetensors==0.6.2
 scikit-learn==1.8.0
 scipy==1.16.2
 seaborn==0.13.2
+sensor-msgs==5.3.6
+sensor-msgs-py==5.3.6
 sentry-sdk==2.42.0
+service-msgs==2.0.3
 setuptools==68.1.2
+shape-msgs==5.3.6
 shapely==2.1.2
 six==1.16.0
 smmap==5.0.2
@@ -371,6 +422,9 @@ srdfdom==2.0.7
 sros2==0.13.4
 ssm==0.0.1
 statistics-msgs==2.0.3
+std-msgs==5.3.6
+std-srvs==5.3.6
+stereo-msgs==5.3.6
 stitching==0.6.1
 svg.path==7.0
 swift-sim==1.1.0
@@ -381,6 +435,13 @@ tensorboard-data-server==0.7.2
 tensorboardX==2.6.4
 termcolor==3.1.0
 tf-transformations==1.1.0
+tf2-geometry-msgs==0.36.16
+tf2-kdl==0.36.16
+tf2-msgs==0.36.16
+tf2-py==0.36.16
+tf2-ros-py==0.36.16
+tf2-sensor-msgs==0.36.16
+tf2-tools==0.36.16
 theora-image-transport==4.0.6
 threadpoolctl==3.6.0
 tokenizers==0.19.1
@@ -391,6 +452,7 @@ topic-tools-interfaces==1.3.3
 torch==2.10.0
 torchvision==0.25.0
 tqdm==4.67.1
+trajectory-msgs==5.3.6
 transformers==4.41.2
 transforms3d==0.4.2
 trimesh==4.8.3
@@ -403,6 +465,7 @@ typing_extensions==4.15.0
 tzlocal==5.2
 ufoLib2==0.16.0
 unicodedata2==15.1.0
+unique-identifier-msgs==2.5.0
 urdfdom-py==1.2.1
 urdfpy==0.0.22
 urllib3==2.0.7
@@ -411,6 +474,7 @@ vcstools==0.1.42
 vhacdx==0.0.8.post2
 virtualenv==20.34.0
 vision-msgs==4.1.1
+visualization-msgs==5.3.6
 wadllib==1.3.6
 wandb==0.22.2
 webencodings==0.5.1
