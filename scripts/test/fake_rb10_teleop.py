@@ -64,7 +64,7 @@ class TeleopRunner:
 
             q = self.ctrl.compute_target_qpos_from_pose(pos_tgt, quat_tgt, enforce_guard=self.enforce_guard)
             if q is not None:
-                self.ctrl.publish_qpos(q.tolist())
+                self.ctrl.publish_joint_trajectory([q.tolist()], [0.3])
 
             dt = self.period - (time.time() - t0)
             if dt > 0: time.sleep(dt)

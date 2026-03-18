@@ -23,6 +23,7 @@ from rb10_control.joint_trajectory_controller import (  # noqa: E402
     MAX_STEP_L2_RAD,
     MAX_STEP_PER_JOINT_RAD,
     RB10Controller,
+    TASK_STOP_SERVICE,
     URDF_PATH,
     main,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "MAX_STEP_L2_RAD",
     "MAX_STEP_PER_JOINT_RAD",
     "RB10Controller",
+    "TASK_STOP_SERVICE",
     "URDF_PATH",
     "main",
 ]

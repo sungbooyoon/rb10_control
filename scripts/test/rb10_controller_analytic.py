@@ -212,19 +212,33 @@ class RB10Controller(Node):
             return None
 
     # ---------------- Trajectory publish ----------------
-    def publish_qpos(self, q_goal: List[float], duration: float = 0.3) -> bool:
+    def publish_joint_trajectory(
+        self,
+        q_goals: List[List[float]],
+        durations: List[float],
+    ) -> bool:
+        if len(q_goals) != len(durations):
+            raise ValueError("q_goals and durations length mismatch")
+
         traj = JointTrajectory()
         traj.joint_names = JOINT_NAMES
+        traj.points = []
 
-        p1 = JointTrajectoryPoint()
-        p1.positions = list(map(float, q_goal))
-        p1.time_from_start = Duration(seconds=float(max(0.2, duration))).to_msg()
+        elapsed = 0.0
+        for q_goal, duration in zip(q_goals, durations):
+            elapsed += float(max(0.2, duration))
+            p = JointTrajectoryPoint()
+            p.positions = list(map(float, q_goal))
+            p.time_from_start = Duration(seconds=elapsed).to_msg()
+            traj.points.append(p)
 
-        traj.points = [p1]
         self.traj_pub.publish(traj)
         if DEBUG:
-            self.get_logger().info(f"Trajectory published (duration={duration:.2f}s)")
+            self.get_logger().info(f"Trajectory published (points={len(traj.points)}, total={elapsed:.2f}s)")
         return True
+
+    def publish_qpos(self, q_goal: List[float], duration: float = 0.3) -> bool:
+        return self.publish_joint_trajectory([q_goal], [duration])
 
     # ---------------- 현재 EE pose ----------------
     def get_current_ee_pose(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
@@ -260,7 +274,7 @@ def main():
 
         q = node.compute_target_qpos_from_pose(target_ee_pos, target_ee_rot_xyzw, enforce_guard=False)
         if q is not None:
-            node.publish_qpos(q.tolist(), duration=10.0)
+            node.publish_joint_trajectory([q.tolist()], [10.0])
             if DEBUG:
                 node.get_logger().info("Moved to target pose.")
 

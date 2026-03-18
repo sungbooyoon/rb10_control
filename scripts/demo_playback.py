@@ -295,9 +295,9 @@ def main():
         try:
             secs = max(0.1, float(args.initial_move_seconds))
             print(f"[INFO] Moving to initial pose ({secs:.1f}s)...")
-            ctrl.publish_qpos(np.asarray(q0_rad, dtype=float).tolist(), duration=secs)
+            ctrl.publish_joint_trajectory([np.asarray(q0_rad, dtype=float).tolist()], [secs])
         except Exception as e:
-            print(f"[WARN] publish_qpos (initial) failed: {e}")
+            print(f"[WARN] publish_joint_trajectory (initial) failed: {e}")
         input("[KEY] Press ENTER to start playback...")
 
     # Playback
@@ -314,9 +314,12 @@ def main():
         else:
             if args.execute:
                 try:
-                    ctrl.publish_qpos(np.asarray(q_rad, dtype=float).tolist(), duration=max(0.05, 2.0 / hz))
+                    ctrl.publish_joint_trajectory(
+                        [np.asarray(q_rad, dtype=float).tolist()],
+                        [max(0.05, 2.0 / hz)],
+                    )
                 except Exception as e:
-                    print(f"[WARN] publish_qpos failed at k={i0+idx}: {e}")
+                    print(f"[WARN] publish_joint_trajectory failed at k={i0+idx}: {e}")
             else:
                 print(f"k={i0+idx}: q={np.asarray(q_rad).round(4).tolist()}")
 

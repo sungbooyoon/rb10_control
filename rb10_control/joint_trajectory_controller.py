@@ -19,6 +19,7 @@ import rclpy
 from ikpy.chain import Chain
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rbpodo_msgs.srv import TaskStop
 from sensor_msgs.msg import JointState
 from tf2_ros import Buffer, TransformListener
 from tf_transformations import quaternion_from_matrix, quaternion_matrix
@@ -27,6 +28,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 # ================= Config =================
 JTC_TOPIC = "/joint_trajectory_controller/joint_trajectory"
 JOINT_STATES_TOPIC = "/joint_states"
+TASK_STOP_SERVICE = "/rbpodo_hardware/task_stop"
 
 BASE_LINK = "link0"
 EE_LINK = "tcp"
@@ -58,6 +60,7 @@ class RB10Controller(Node):
         urdf_path: str = URDF_PATH,
         joint_states_topic: str = JOINT_STATES_TOPIC,
         jtc_topic: str = JTC_TOPIC,
+        task_stop_service: str = TASK_STOP_SERVICE,
         wait_for_joint_state_sec: float = 5.0,
     ):
         super().__init__("rb10_controller")
@@ -67,6 +70,7 @@ class RB10Controller(Node):
         self.urdf_path = str(urdf_path)
         self.joint_states_topic = str(joint_states_topic)
         self.jtc_topic = str(jtc_topic)
+        self.task_stop_service = str(task_stop_service)
 
         # 외부에서 확인 가능한 최근 IK 실패 사유
         self.last_ik_fail: Optional[str] = None
@@ -74,6 +78,7 @@ class RB10Controller(Node):
         # pubs/subs
         self.joint_sub = self.create_subscription(JointState, self.joint_states_topic, self._joint_cb, 10)
         self.traj_pub = self.create_publisher(JointTrajectory, self.jtc_topic, 10)
+        self.task_stop_client = self.create_client(TaskStop, self.task_stop_service)
 
         # TF
         self.tf_buf = Buffer()
@@ -286,13 +291,20 @@ class RB10Controller(Node):
         return q_path
 
     # ---------- Trajectory publish ----------
-    def publish_qpos(self, q_goal: List[float], duration: float = 0.3) -> bool:
-        return self.publish_joint_trajectory([q_goal], [duration])
+    def publish_qpos(
+        self,
+        q_goal: List[float],
+        duration: float = 0.3,
+        min_point_duration: float = 0.20,
+    ) -> bool:
+        # Backward-compatible convenience wrapper for single-point commands.
+        return self.publish_joint_trajectory([q_goal], [duration], min_point_duration=min_point_duration)
 
     def publish_joint_trajectory(
         self,
         q_goals: Sequence[Sequence[float]],
         durations: Sequence[float],
+        min_point_duration: float = 0.20,
     ) -> bool:
         if len(q_goals) == 0:
             raise ValueError("q_goals must not be empty")
@@ -304,12 +316,13 @@ class RB10Controller(Node):
         traj.points = []
 
         elapsed = 0.0
+        min_dt = max(0.0, float(min_point_duration))
         for i, (q_goal, duration) in enumerate(zip(q_goals, durations)):
             q = self._coerce_q6(q_goal, name=f"q_goal[{i}]")
             dt = float(duration)
             if not np.isfinite(dt):
                 raise ValueError(f"duration[{i}] is NaN/Inf")
-            elapsed += max(0.2, dt)
+            elapsed += max(min_dt, dt)
 
             p = JointTrajectoryPoint()
             p.positions = q.tolist()
@@ -330,6 +343,7 @@ class RB10Controller(Node):
         point_durations: Sequence[float],
         enforce_guard: bool = True,
         seed_q: Optional[Sequence[float]] = None,
+        min_point_duration: float = 0.20,
     ) -> Optional[List[np.ndarray]]:
         if len(point_durations) != int(np.asarray(target_ee_positions).shape[0]):
             raise ValueError("point_durations length must match the number of target poses")
@@ -343,8 +357,40 @@ class RB10Controller(Node):
         if q_path is None:
             return None
 
-        self.publish_joint_trajectory(q_path, point_durations)
+        self.publish_joint_trajectory(q_path, point_durations, min_point_duration=min_point_duration)
         return q_path
+
+    def emergency_stop(self, timeout: float = 1.0, wait_for_service_sec: float = 0.5) -> bool:
+        req = TaskStop.Request()
+        req.timeout = float(timeout)
+
+        if not self.task_stop_client.wait_for_service(timeout_sec=max(0.0, float(wait_for_service_sec))):
+            self.get_logger().warn(f"TaskStop service unavailable: {self.task_stop_service}")
+            return False
+
+        future = self.task_stop_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=max(0.0, float(timeout)))
+
+        if not future.done():
+            self.get_logger().warn("TaskStop service call timed out")
+            return False
+
+        exc = future.exception()
+        if exc is not None:
+            self.get_logger().warn(f"TaskStop service call failed: {exc}")
+            return False
+
+        result = future.result()
+        if result is None:
+            self.get_logger().warn("TaskStop service returned no response")
+            return False
+
+        ok = bool(result.success)
+        if ok:
+            self.get_logger().warn("Emergency stop requested via TaskStop")
+        else:
+            self.get_logger().warn("TaskStop service responded with success=False")
+        return ok
 
     # ---------- 상태 조회 ----------
     def get_chain_tip_link_name(self) -> str:
@@ -398,7 +444,7 @@ def main() -> None:
 
         q = node.compute_target_qpos_from_pose(target_ee_pos, target_ee_rot_xyzw, enforce_guard=False)
         if q is not None:
-            node.publish_qpos(q.tolist(), duration=10.0)
+            node.publish_joint_trajectory([q.tolist()], [10.0])
             if DEBUG:
                 node.get_logger().info("Moved to target pose.")
     finally:
@@ -418,6 +464,7 @@ __all__ = [
     "MAX_STEP_L2_RAD",
     "MAX_STEP_PER_JOINT_RAD",
     "RB10Controller",
+    "TASK_STOP_SERVICE",
     "URDF_PATH",
     "main",
 ]

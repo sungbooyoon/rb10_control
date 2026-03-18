@@ -241,7 +241,7 @@ class RBPodoAdmittanceJointController(RB10Controller):
         q_cmd = self.compute_target_qpos_from_pose(self._x_d, self._q_d, enforce_guard=True)
         if q_cmd is None:
             return
-        self.publish_qpos(q_cmd.tolist())
+        self.publish_joint_trajectory([q_cmd.tolist()], [0.3])
 
 
 def main() -> None:

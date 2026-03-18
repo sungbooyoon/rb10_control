@@ -121,7 +121,7 @@ class TeleopRunner:
 
             q = self.ctrl.compute_target_qpos_from_pose(pos_tgt, quat_tgt, enforce_guard=self.enforce_guard)
             if q is not None:
-                self.ctrl.publish_qpos(q.tolist())
+                self.ctrl.publish_joint_trajectory([q.tolist()], [0.3])
                 if self.verbose:
                     self.ctrl.get_logger().info("teleop tick ok")
 

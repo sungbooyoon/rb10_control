@@ -268,7 +268,7 @@ class BagJointTrajectoryPlayer(RB10Controller):
         self.get_logger().warn(
             f"Warmup: moving to first bag q over {self.warmup_duration:.2f}s."
         )
-        self.publish_qpos(q1, duration=self.warmup_duration)
+        self.publish_joint_trajectory([q1], [self.warmup_duration])
 
         return True
 
@@ -296,7 +296,7 @@ class BagJointTrajectoryPlayer(RB10Controller):
             and sent < self.max_points_per_tick
         ):
             q_cmd = self.samples[self.i].q
-            self.publish_qpos(q_cmd, duration=self.point_duration)
+            self.publish_joint_trajectory([q_cmd], [self.point_duration])
 
             self.i += 1
             sent += 1
