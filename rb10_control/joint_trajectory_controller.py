@@ -39,7 +39,7 @@ JOINT_NAMES = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]
 URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb10_1300e_u.urdf"
 
 # IKPy active mask (fixed=False, 가동조인트=True, 최종 tcp는 프레임만 포함하므로 False)
-ACTIVE_LINKS_MASK = [False, True, True, True, True, True, True, False]
+ACTIVE_LINKS_MASK = [False, True, True, True, True, True, True, False, False]
 
 # 안전가드
 MAX_STEP_PER_JOINT_RAD = 0.20
