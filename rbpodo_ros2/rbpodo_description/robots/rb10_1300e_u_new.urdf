@@ -118,52 +118,74 @@
       <inertia ixx="0.000345314" ixy="5.73e-07" ixz="6.61e-07" iyy="0.000532873" iyz="-5.4e-08" izz="0.000340021"/>
     </inertial>
   </link>
+  <link name="eoat">
+    <visual>
+      <geometry>
+        <mesh filename="package://rbpodo_description/meshes/rb10_1300e_u/visual/eoat.dae"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="package://rbpodo_description/meshes/rb10_1300e_u/collision/eoat.stl"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="4"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
   <link name="tcp"/>
   <joint name="base" type="revolute">
     <origin rpy="0 0 0" xyz="0 0 0"/>
     <parent link="link0"/>
     <child link="link1"/>
     <axis xyz="0 0 1"/>
-    <limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+    <limit effort="10" lower="-6.28" upper="6.28" velocity="3.14"/>
   </joint>
   <joint name="shoulder" type="revolute">
     <origin rpy="0 0 0" xyz="0 0 0.197"/>
     <parent link="link1"/>
     <child link="link2"/>
     <axis xyz="0 1 0"/>
-    <limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+    <limit effort="10" lower="-6.28" upper="6.28" velocity="3.14"/>
   </joint>
   <joint name="elbow" type="revolute">
     <origin rpy="0 0 0" xyz="0 -0.1875 0.6127"/>
     <parent link="link2"/>
     <child link="link3"/>
     <axis xyz="0 1 0"/>
-    <limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+    <limit effort="10" lower="-2.87" upper="2.87" velocity="3.14"/>
   </joint>
   <joint name="wrist1" type="revolute">
     <origin rpy="0 0 0" xyz="0 0.1514 0.57015"/>
     <parent link="link3"/>
     <child link="link4"/>
     <axis xyz="0 1 0"/>
-    <limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+    <limit effort="10" lower="-6.28" upper="6.28" velocity="3.14"/>
   </joint>
   <joint name="wrist2" type="revolute">
     <origin rpy="0 0 0" xyz="0 -0.11715 0"/>
     <parent link="link4"/>
     <child link="link5"/>
     <axis xyz="0 0 1"/>
-    <limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+    <limit effort="10" lower="-6.28" upper="6.28" velocity="3.14"/>
   </joint>
   <joint name="wrist3" type="revolute">
     <origin rpy="0 0 0" xyz="0 0 0.11715"/>
     <parent link="link5"/>
     <child link="link6"/>
     <axis xyz="0 1 0"/>
-    <limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+    <limit effort="10" lower="-6.28" upper="6.28" velocity="3.14"/>
+  </joint>
+  <joint name="eoat_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0 -0.1153 0"/>
+    <parent link="link6"/>
+    <child link="eoat"/>
   </joint>
   <joint name="tcp_joint" type="fixed">
-    <origin rpy="0 -1.57079632679 3.14159265359" xyz="0.143832 -0.26 0.04234"/>
-    <parent link="link6"/>
+    <origin rpy="0 -1.57079632679 3.14159265359" xyz="0.143832 -0.1447 0.04234"/>
+    <parent link="eoat"/>
     <child link="tcp"/>
   </joint>
   <ros2_control name="RBPodoHardwareInterface" type="system">
