@@ -356,8 +356,6 @@ class RB10Controller(Node):
         return (
             f"seed={self._format_array(candidate.seed6)} | "
             f"q={self._format_array(candidate.q6)} | "
-            f"pos_err={candidate.pos_err_m:.4f} m | "
-            f"ang_err={math.degrees(candidate.ang_err_rad):.2f} deg | "
             f"guard_max={candidate.guard_max_abs_rad:.3f} rad | "
             f"guard_l2={candidate.guard_l2_rad:.3f} rad"
         )
