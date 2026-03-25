@@ -353,6 +353,57 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
         self.assertLess(abs(float(q_goal[0]) - 0.12), 1e-9)
         self.assertIsNone(controller.last_ik_fail)
 
+    def test_execute_pose_sequence_refines_guard_failing_segment(self):
+        controller = self.module.RB10Controller(urdf_path="/tmp/rb10.urdf", wait_for_joint_state_sec=0.0)
+        controller._latest_positions = np.zeros(6, dtype=float)
+
+        published = {}
+
+        def _fake_publish(q_goals, durations, min_point_duration=0.0):
+            published["q_goals"] = [np.asarray(q, dtype=float).copy() for q in q_goals]
+            published["durations"] = list(durations)
+            published["min_point_duration"] = float(min_point_duration)
+            return True
+
+        def _fake_compute(target_ee_pos, target_ee_rot, enforce_guard=True, seed_q=None):
+            x = float(np.asarray(target_ee_pos, dtype=float)[0])
+            seed0 = float(np.asarray(seed_q, dtype=float)[0])
+            if abs(x - 1.0) < 1e-9 and abs(seed0) < 1e-9:
+                controller.last_ik_fail = "TRAC-IK guard reject | synthetic full-step failure"
+                return None
+            q = np.zeros(6, dtype=float)
+            if abs(x - 0.5) < 1e-9:
+                q[0] = 0.10
+            elif abs(x - 1.0) < 1e-9:
+                q[0] = 0.20
+            else:
+                q[0] = x * 0.2
+            controller.last_ik_fail = None
+            return q
+
+        controller.publish_joint_trajectory = _fake_publish
+        controller.compute_target_qpos_from_pose = _fake_compute
+
+        q_path = controller.execute_pose_sequence(
+            target_ee_positions=np.array([[1.0, 0.0, 0.0]], dtype=float),
+            target_ee_rots=np.array([[0.0, 0.0, 0.0, 1.0]], dtype=float),
+            point_durations=[0.8],
+            enforce_guard=True,
+            seed_q=np.zeros(6, dtype=float),
+            min_point_duration=0.0,
+            start_ee_position=np.array([0.0, 0.0, 0.0], dtype=float),
+            start_ee_rot=np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
+            max_guard_refine_depth=1,
+        )
+
+        self.assertIsNotNone(q_path)
+        self.assertEqual(len(q_path), 2)
+        self.assertAlmostEqual(float(q_path[0][0]), 0.10, places=9)
+        self.assertAlmostEqual(float(q_path[1][0]), 0.20, places=9)
+        self.assertIn("q_goals", published)
+        self.assertEqual(len(published["q_goals"]), 2)
+        self.assertEqual(published["durations"], [0.4, 0.4])
+
     def test_fk_uses_tracik_fk(self):
         self.fake_classes["FakeTracIK"].next_fk_pos = np.array([0.4, 0.1, 0.2], dtype=float)
         self.fake_classes["FakeTracIK"].next_fk_rot = np.eye(3, dtype=float)
