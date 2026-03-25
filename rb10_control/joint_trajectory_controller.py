@@ -17,6 +17,10 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 import rclpy
 from ikpy.chain import Chain
+try:
+    from trac_ik import TracIK
+except ImportError:
+    TracIK = None  # type: ignore[assignment]
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rbpodo_msgs.srv import TaskStop
@@ -38,7 +42,7 @@ JOINT_NAMES = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]
 
 URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb10_1300e_u.urdf"
 
-# IKPy active mask (fixed=False, 가동조인트=True, 최종 tcp는 프레임만 포함하므로 False)
+# FK/링크 인덱스 계산용 IKPy active mask (fixed=False, 가동조인트=True, 최종 tcp는 프레임만 포함하므로 False)
 ACTIVE_LINKS_MASK = [False, True, True, True, True, True, True, False]
 
 # 안전가드
@@ -84,7 +88,13 @@ class RB10Controller(Node):
         self.tf_buf = Buffer()
         self.tf_listener = TransformListener(self.tf_buf, self)
 
-        # IKPy 체인 (full: fixed 포함, active mask 적용)
+        if TracIK is None:
+            raise RuntimeError(
+                "TRAC-IK backend requires the Python package 'trac_ik'. "
+                "Install it in the sourced ROS environment first."
+            )
+
+        # FK/링크 인덱스 계산용 IKPy 체인 (full: fixed 포함, active mask 적용)
         self.chain = Chain.from_urdf_file(
             self.urdf_path,
             base_elements=[self.base_link],
@@ -109,6 +119,15 @@ class RB10Controller(Node):
             )
         elif DEBUG:
             self.get_logger().info(f"IKPy chain tip verified: {tip_name}")
+
+        try:
+            self._tracik_solver = TracIK(
+                base_link_name=self.base_link,
+                tip_link_name=self.ee_link,
+                urdf_path=self.urdf_path,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialize TRAC-IK: {exc}") from exc
 
         # 최신 JointState(6개, JOINT_NAMES 순)
         self._latest_positions: Optional[np.ndarray] = None
@@ -229,24 +248,30 @@ class RB10Controller(Node):
         q /= n
         r_tgt = quaternion_matrix(q)[:3, :3]
 
-        seed_full = self._q_full_from_q6(seed6)
         try:
-            q_full = self.chain.inverse_kinematics(
-                target_position=p.tolist(),
-                target_orientation=r_tgt.tolist(),
-                initial_position=seed_full,
-                max_iter=IK_MAX_ITER,
-                orientation_mode="all",
+            result = self._tracik_solver.ik(
+                p,
+                r_tgt,
+                seed_jnt_values=np.asarray(seed6, dtype=float),
             )
         except Exception as e:
-            self._ik_fail("IKPy inverse exception", str(e))
+            self._ik_fail("TRAC-IK exception", str(e))
             return None
 
-        if q_full is None:
-            self._ik_fail("IKPy returned None")
+        if result is None:
+            self._ik_fail("TRAC-IK returned no solution")
             return None
 
-        q6 = self._q6_from_q_full(np.asarray(q_full, dtype=float))
+        q6 = np.asarray(result, dtype=float).reshape(-1)
+        if q6.shape[0] != len(JOINT_NAMES):
+            self._ik_fail(
+                "TRAC-IK returned unexpected joint dimension",
+                f"got={q6.shape[0]} expected={len(JOINT_NAMES)}",
+            )
+            return None
+        if not np.all(np.isfinite(q6)):
+            self._ik_fail("TRAC-IK returned NaN/Inf")
+            return None
         if enforce_guard and not self._guard_ok(q6, seed6):
             return None
         return q6

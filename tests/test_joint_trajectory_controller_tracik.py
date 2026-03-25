@@ -1,0 +1,290 @@
+import importlib.util
+import math
+import sys
+import types
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+
+
+MODULE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "rb10_control"
+    / "joint_trajectory_controller.py"
+)
+
+
+def _quat_xyzw_to_rotmat(quat_xyzw):
+    q = np.asarray(quat_xyzw, dtype=float).reshape(4)
+    norm = float(np.linalg.norm(q))
+    if norm <= 0.0 or not np.isfinite(norm):
+        raise ValueError("invalid quaternion")
+    x, y, z, w = q / norm
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    xy = x * y
+    xz = x * z
+    yz = y * z
+    wx = w * x
+    wy = w * y
+    wz = w * z
+    return np.array(
+        [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+        ],
+        dtype=float,
+    )
+
+
+def _install_fake_modules():
+    class FakeLogger:
+        def __init__(self):
+            self.messages = []
+
+        def info(self, msg):
+            self.messages.append(("info", msg))
+
+        def warn(self, msg):
+            self.messages.append(("warn", msg))
+
+        def error(self, msg):
+            self.messages.append(("error", msg))
+
+    class FakeClock:
+        def now(self):
+            return types.SimpleNamespace(nanoseconds=0)
+
+    class FakePublisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, msg):
+            self.messages.append(msg)
+
+    class FakeClient:
+        def wait_for_service(self, timeout_sec=0.0):
+            return True
+
+        def call_async(self, req):
+            future = types.SimpleNamespace()
+            future.done = lambda: True
+            future.exception = lambda: None
+            future.result = lambda: types.SimpleNamespace(success=True)
+            return future
+
+    class FakeNode:
+        def __init__(self, name):
+            self._name = name
+            self._logger = FakeLogger()
+            self._clock = FakeClock()
+
+        def create_subscription(self, *args, **kwargs):
+            return object()
+
+        def create_publisher(self, *args, **kwargs):
+            return FakePublisher()
+
+        def create_client(self, *args, **kwargs):
+            return FakeClient()
+
+        def get_logger(self):
+            return self._logger
+
+        def get_clock(self):
+            return self._clock
+
+        def destroy_node(self):
+            return None
+
+    class FakeDuration:
+        def __init__(self, seconds=0.0):
+            self.seconds = float(seconds)
+
+        def to_msg(self):
+            return types.SimpleNamespace(seconds=self.seconds)
+
+    class FakeLink:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeChain:
+        def __init__(self):
+            self.links = [FakeLink(v) for v in ["world", "base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3", "tcp"]]
+
+        @classmethod
+        def from_urdf_file(cls, urdf_path, base_elements=None, active_links_mask=None):
+            return cls()
+
+        def forward_kinematics(self, q_full):
+            return np.eye(4, dtype=float)
+
+    class FakeTracIK:
+        instances = []
+        next_result = np.zeros(6, dtype=float)
+        next_exception = None
+
+        def __init__(self, base_link_name, tip_link_name, urdf_path):
+            self.base_link_name = base_link_name
+            self.tip_link_name = tip_link_name
+            self.urdf_path = urdf_path
+            self.ik_calls = []
+            self.__class__.instances.append(self)
+
+        def ik(self, target_pos, target_rotmat, seed_jnt_values=None):
+            self.ik_calls.append(
+                {
+                    "target_pos": np.asarray(target_pos, dtype=float).copy(),
+                    "target_rotmat": np.asarray(target_rotmat, dtype=float).copy(),
+                    "seed_jnt_values": np.asarray(seed_jnt_values, dtype=float).copy(),
+                }
+            )
+            if self.__class__.next_exception is not None:
+                raise self.__class__.next_exception
+            if self.__class__.next_result is None:
+                return None
+            return np.asarray(self.__class__.next_result, dtype=float).copy()
+
+    fake_rclpy = types.ModuleType("rclpy")
+    fake_rclpy.ok = lambda: False
+    fake_rclpy.init = lambda *args, **kwargs: None
+    fake_rclpy.shutdown = lambda *args, **kwargs: None
+    fake_rclpy.spin_once = lambda *args, **kwargs: None
+    fake_rclpy.spin_until_future_complete = lambda *args, **kwargs: None
+    fake_rclpy.time = types.SimpleNamespace(Time=lambda: None)
+
+    fake_rclpy_duration = types.ModuleType("rclpy.duration")
+    fake_rclpy_duration.Duration = FakeDuration
+
+    fake_rclpy_node = types.ModuleType("rclpy.node")
+    fake_rclpy_node.Node = FakeNode
+
+    fake_ikpy = types.ModuleType("ikpy")
+    fake_ikpy_chain = types.ModuleType("ikpy.chain")
+    fake_ikpy_chain.Chain = FakeChain
+
+    fake_trac_ik = types.ModuleType("trac_ik")
+    fake_trac_ik.TracIK = FakeTracIK
+
+    fake_rbpodo_msgs = types.ModuleType("rbpodo_msgs")
+    fake_rbpodo_msgs_srv = types.ModuleType("rbpodo_msgs.srv")
+    fake_rbpodo_msgs_srv.TaskStop = types.SimpleNamespace(Request=type("Request", (), {}))
+
+    fake_sensor_msgs = types.ModuleType("sensor_msgs")
+    fake_sensor_msgs_msg = types.ModuleType("sensor_msgs.msg")
+    fake_sensor_msgs_msg.JointState = type("JointState", (), {})
+
+    fake_tf2_ros = types.ModuleType("tf2_ros")
+    fake_tf2_ros.Buffer = type("Buffer", (), {})
+    fake_tf2_ros.TransformListener = type("TransformListener", (), {"__init__": lambda self, *args, **kwargs: None})
+
+    fake_tf_transformations = types.ModuleType("tf_transformations")
+    fake_tf_transformations.quaternion_from_matrix = lambda T: np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
+    fake_tf_transformations.quaternion_matrix = lambda q: np.block(
+        [
+            [_quat_xyzw_to_rotmat(q), np.zeros((3, 1), dtype=float)],
+            [np.zeros((1, 3), dtype=float), np.ones((1, 1), dtype=float)],
+        ]
+    )
+
+    fake_trajectory_msgs = types.ModuleType("trajectory_msgs")
+    fake_trajectory_msgs_msg = types.ModuleType("trajectory_msgs.msg")
+    fake_trajectory_msgs_msg.JointTrajectory = type("JointTrajectory", (), {"__init__": lambda self: setattr(self, "points", []) or setattr(self, "joint_names", [])})
+    fake_trajectory_msgs_msg.JointTrajectoryPoint = type("JointTrajectoryPoint", (), {"__init__": lambda self: None})
+
+    modules = {
+        "rclpy": fake_rclpy,
+        "rclpy.duration": fake_rclpy_duration,
+        "rclpy.node": fake_rclpy_node,
+        "ikpy": fake_ikpy,
+        "ikpy.chain": fake_ikpy_chain,
+        "trac_ik": fake_trac_ik,
+        "rbpodo_msgs": fake_rbpodo_msgs,
+        "rbpodo_msgs.srv": fake_rbpodo_msgs_srv,
+        "sensor_msgs": fake_sensor_msgs,
+        "sensor_msgs.msg": fake_sensor_msgs_msg,
+        "tf2_ros": fake_tf2_ros,
+        "tf_transformations": fake_tf_transformations,
+        "trajectory_msgs": fake_trajectory_msgs,
+        "trajectory_msgs.msg": fake_trajectory_msgs_msg,
+    }
+    return modules, {"FakeTracIK": FakeTracIK}
+
+
+def _load_module():
+    modules, fake_classes = _install_fake_modules()
+    module_name = "rb10_control_joint_trajectory_controller_test"
+    sys.modules.pop(module_name, None)
+    with mock.patch.dict(sys.modules, modules):
+        spec = importlib.util.spec_from_file_location(module_name, MODULE_PATH)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    return module, fake_classes
+
+
+class RB10ControllerTRACIKTests(unittest.TestCase):
+    def setUp(self):
+        self.module, self.fake_classes = _load_module()
+        self.fake_classes["FakeTracIK"].instances.clear()
+        self.fake_classes["FakeTracIK"].next_result = np.zeros(6, dtype=float)
+        self.fake_classes["FakeTracIK"].next_exception = None
+
+    def test_tracik_seed_and_rotation_matrix_are_used(self):
+        self.fake_classes["FakeTracIK"].next_result = np.array([0.3, -0.1, 0.2, 0.4, -0.5, 0.6], dtype=float)
+
+        controller = self.module.RB10Controller(urdf_path="/tmp/rb10.urdf", wait_for_joint_state_sec=0.0)
+        controller._latest_positions = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=float)
+        quat_y_90 = np.array([0.0, math.sin(math.pi / 4.0), 0.0, math.cos(math.pi / 4.0)], dtype=float)
+
+        q_goal = controller.compute_target_qpos_from_pose(
+            np.array([0.3, -0.2, 0.4], dtype=float),
+            quat_y_90,
+            enforce_guard=False,
+        )
+
+        np.testing.assert_allclose(q_goal, self.fake_classes["FakeTracIK"].next_result)
+        solver = self.fake_classes["FakeTracIK"].instances[-1]
+        self.assertEqual(solver.base_link_name, "link0")
+        self.assertEqual(solver.tip_link_name, "tcp")
+        self.assertEqual(solver.urdf_path, "/tmp/rb10.urdf")
+        ik_call = solver.ik_calls[-1]
+        np.testing.assert_allclose(ik_call["target_pos"], np.array([0.3, -0.2, 0.4], dtype=float))
+        np.testing.assert_allclose(ik_call["seed_jnt_values"], np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=float))
+        np.testing.assert_allclose(
+            ik_call["target_rotmat"],
+            np.array(
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                ],
+                dtype=float,
+            ),
+            atol=1e-8,
+        )
+
+    def test_tracik_failure_sets_last_ik_fail(self):
+        self.fake_classes["FakeTracIK"].next_result = None
+
+        controller = self.module.RB10Controller(urdf_path="/tmp/rb10.urdf", wait_for_joint_state_sec=0.0)
+        controller._latest_positions = np.zeros(6, dtype=float)
+
+        q_goal = controller.compute_target_qpos_from_pose(
+            np.array([0.6, -0.1, 0.2], dtype=float),
+            np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
+            enforce_guard=False,
+        )
+
+        self.assertIsNone(q_goal)
+        self.assertIsNotNone(controller.last_ik_fail)
+        self.assertIn("TRAC-IK returned no solution", controller.last_ik_fail)
+
+
+if __name__ == "__main__":
+    unittest.main()
