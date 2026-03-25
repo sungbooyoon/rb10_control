@@ -43,8 +43,8 @@ JOINT_NAMES = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]
 URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb10_1300e_u.urdf"
 
 # 안전가드
-MAX_STEP_PER_JOINT_RAD = 0.20
-MAX_STEP_L2_RAD = 0.40
+MAX_STEP_PER_JOINT_RAD = 0.25
+MAX_STEP_L2_RAD = 0.45
 
 # TRAC-IK 잔차 허용치
 IK_ACCEPT_POS_ERR_M = 0.015
