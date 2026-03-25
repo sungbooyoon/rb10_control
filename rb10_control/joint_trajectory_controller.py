@@ -13,7 +13,6 @@ while still supporting the legacy script entrypoint in
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -47,13 +46,10 @@ URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb1
 MAX_STEP_PER_JOINT_RAD = 0.25
 MAX_STEP_L2_RAD = 0.45
 
-# TRAC-IK 후보 선택
-IK_SCORE_ANG_WEIGHT_M = 0.03
+# TRAC-IK 잔차 허용치
 IK_ACCEPT_POS_ERR_M = 0.015
 IK_ACCEPT_ANG_ERR_DEG = 7.5
 IK_ALLOW_APPROXIMATE = True
-IK_BASE_SEED_OFFSETS_RAD = (0.0, math.pi, -math.pi)
-IK_MAX_GUARD_REFINE_DEPTH = 3
 
 # 디버그 토글
 DEBUG = False
@@ -85,42 +81,6 @@ def _quat_normalize(quat_xyzw: Sequence[float]) -> np.ndarray:
     return q / norm
 
 
-def _quat_slerp_xyzw(q0: Sequence[float], q1: Sequence[float], alpha: float) -> np.ndarray:
-    qa = _quat_normalize(q0)
-    qb = _quat_normalize(q1)
-    dot = float(np.dot(qa, qb))
-    if dot < 0.0:
-        qb = -qb
-        dot = -dot
-
-    if dot > 0.9995:
-        out = qa + float(alpha) * (qb - qa)
-        return _quat_normalize(out)
-
-    theta_0 = math.acos(max(-1.0, min(1.0, dot)))
-    sin_theta_0 = math.sin(theta_0)
-    if abs(sin_theta_0) < 1e-12:
-        return qa.copy()
-
-    theta = theta_0 * float(alpha)
-    sin_theta = math.sin(theta)
-    s0 = math.cos(theta) - dot * sin_theta / sin_theta_0
-    s1 = sin_theta / sin_theta_0
-    return _quat_normalize((s0 * qa) + (s1 * qb))
-
-
-@dataclass
-class IKCandidate:
-    seed6: np.ndarray
-    q6: np.ndarray
-    pos_err_m: float
-    ang_err_rad: float
-    score: float
-    guard_max_abs_rad: float
-    guard_l2_rad: float
-    guard_ok: bool
-
-
 class RB10Controller(Node):
     """BASE(frame) 기준 pos(3) + quat(xyzw) -> IK -> JointTrajectory publish."""
 
@@ -133,12 +93,9 @@ class RB10Controller(Node):
         jtc_topic: str = JTC_TOPIC,
         task_stop_service: str = TASK_STOP_SERVICE,
         wait_for_joint_state_sec: float = 5.0,
-        score_ang_weight_m: float = IK_SCORE_ANG_WEIGHT_M,
         accept_pos_err_m: float = IK_ACCEPT_POS_ERR_M,
         accept_ang_err_deg: float = IK_ACCEPT_ANG_ERR_DEG,
         allow_approximate: bool = IK_ALLOW_APPROXIMATE,
-        base_seed_offsets_rad: Sequence[float] = IK_BASE_SEED_OFFSETS_RAD,
-        max_guard_refine_depth: int = IK_MAX_GUARD_REFINE_DEPTH,
     ):
         super().__init__("rb10_controller")
 
@@ -148,12 +105,9 @@ class RB10Controller(Node):
         self.joint_states_topic = str(joint_states_topic)
         self.jtc_topic = str(jtc_topic)
         self.task_stop_service = str(task_stop_service)
-        self.score_ang_weight_m = float(score_ang_weight_m)
         self.accept_pos_err_m = float(accept_pos_err_m)
         self.accept_ang_err_deg = float(accept_ang_err_deg)
         self.allow_approximate = bool(allow_approximate)
-        self.base_seed_offsets_rad = tuple(float(value) for value in base_seed_offsets_rad)
-        self.max_guard_refine_depth = max(0, int(max_guard_refine_depth))
 
         # 외부에서 확인 가능한 최근 IK 실패 사유
         self.last_ik_fail: Optional[str] = None
@@ -263,159 +217,12 @@ class RB10Controller(Node):
         return (x + np.pi) % (2 * np.pi) - np.pi
 
     @staticmethod
-    def _wrap_pi_scalar(value: float) -> float:
-        return float((value + math.pi) % (2.0 * math.pi) - math.pi)
-
-    @staticmethod
     def _format_array(values: Sequence[float], precision: int = 4) -> str:
         return np.array2string(np.asarray(values, dtype=float), precision=precision, suppress_small=False)
 
     def _guard_metrics(self, q6: np.ndarray, seed6: np.ndarray) -> tuple[float, float]:
         diffs = self._wrap_pi(np.asarray(q6, dtype=float) - np.asarray(seed6, dtype=float))
         return float(np.max(np.abs(diffs))), float(np.linalg.norm(diffs))
-
-    def _make_seed_candidates(self, seed6: np.ndarray, target_pos: np.ndarray) -> List[np.ndarray]:
-        heading = math.atan2(float(target_pos[1]), float(target_pos[0]))
-        candidates: List[np.ndarray] = []
-        seen: set[tuple[float, ...]] = set()
-
-        def add_candidate(q6: Sequence[float]) -> None:
-            q = self._coerce_q6(q6, name="candidate_seed")
-            q = self._wrap_pi(q)
-            key = tuple(np.round(q, decimals=6).tolist())
-            if key in seen:
-                return
-            seen.add(key)
-            candidates.append(q)
-
-        add_candidate(seed6)
-
-        for base_angle in (heading + offset for offset in self.base_seed_offsets_rad):
-            q = np.asarray(seed6, dtype=float).copy()
-            q[0] = self._wrap_pi_scalar(base_angle)
-            add_candidate(q)
-
-        zero_seed = np.zeros_like(seed6)
-        add_candidate(zero_seed)
-        q = zero_seed.copy()
-        q[0] = self._wrap_pi_scalar(heading)
-        add_candidate(q)
-        return candidates
-
-    def _solve_candidate(
-        self,
-        candidate_seed6: np.ndarray,
-        actual_seed6: np.ndarray,
-        target_pos: np.ndarray,
-        target_rotmat: np.ndarray,
-    ) -> Optional[IKCandidate]:
-        try:
-            result = self._tracik_solver.ik(
-                target_pos,
-                target_rotmat,
-                seed_jnt_values=np.asarray(candidate_seed6, dtype=float),
-            )
-        except Exception:
-            return None
-
-        if result is None:
-            return None
-
-        try:
-            q6 = self._coerce_q6(result, name="q6")
-        except Exception:
-            return None
-
-        T = self._fk_current_T_of(q6)
-        if T is None:
-            return None
-
-        fk_pos = np.asarray(T[:3, 3], dtype=float)
-        fk_rot = np.asarray(T[:3, :3], dtype=float)
-        pos_err_m = float(np.linalg.norm(fk_pos - target_pos))
-        ang_err_rad = _rot_angle_rad(target_rotmat, fk_rot)
-        guard_max_abs_rad, guard_l2_rad = self._guard_metrics(q6, actual_seed6)
-        guard_ok = (guard_max_abs_rad <= MAX_STEP_PER_JOINT_RAD) and (guard_l2_rad <= MAX_STEP_L2_RAD)
-        score = float(
-            pos_err_m
-            + (self.score_ang_weight_m * ang_err_rad)
-            + (1e-4 * guard_l2_rad)
-        )
-        return IKCandidate(
-            seed6=np.asarray(candidate_seed6, dtype=float).copy(),
-            q6=np.asarray(q6, dtype=float).copy(),
-            pos_err_m=pos_err_m,
-            ang_err_rad=ang_err_rad,
-            score=score,
-            guard_max_abs_rad=guard_max_abs_rad,
-            guard_l2_rad=guard_l2_rad,
-            guard_ok=guard_ok,
-        )
-
-    def _candidate_summary(self, candidate: IKCandidate) -> str:
-        return (
-            f"seed={self._format_array(candidate.seed6)} | "
-            f"q={self._format_array(candidate.q6)} | "
-            f"guard_max={candidate.guard_max_abs_rad:.3f} rad | "
-            f"guard_l2={candidate.guard_l2_rad:.3f} rad"
-        )
-
-    def _last_ik_fail_is_guard_reject(self) -> bool:
-        reason = str(self.last_ik_fail or "").lower()
-        return ("guard reject" in reason) or ("guard reject:" in reason)
-
-    def _solve_pose_segment_with_guard_refinement(
-        self,
-        start_ee_pos: np.ndarray,
-        start_ee_rot: np.ndarray,
-        target_ee_pos: np.ndarray,
-        target_ee_rot: np.ndarray,
-        seed_q: Sequence[float],
-        enforce_guard: bool,
-        remaining_depth: int,
-    ) -> Optional[List[np.ndarray]]:
-        q_goal = self.compute_target_qpos_from_pose(
-            target_ee_pos,
-            target_ee_rot,
-            enforce_guard=enforce_guard,
-            seed_q=seed_q,
-        )
-        if q_goal is not None:
-            return [np.asarray(q_goal, dtype=float)]
-
-        if (not enforce_guard) or (remaining_depth <= 0) or (not self._last_ik_fail_is_guard_reject()):
-            return None
-
-        start_pos = np.asarray(start_ee_pos, dtype=float).reshape(3)
-        target_pos = np.asarray(target_ee_pos, dtype=float).reshape(3)
-        mid_pos = 0.5 * (start_pos + target_pos)
-        mid_quat = _quat_slerp_xyzw(start_ee_rot, target_ee_rot, 0.5)
-
-        left = self._solve_pose_segment_with_guard_refinement(
-            start_ee_pos=start_pos,
-            start_ee_rot=start_ee_rot,
-            target_ee_pos=mid_pos,
-            target_ee_rot=mid_quat,
-            seed_q=seed_q,
-            enforce_guard=enforce_guard,
-            remaining_depth=remaining_depth - 1,
-        )
-        if left is None:
-            return None
-
-        right = self._solve_pose_segment_with_guard_refinement(
-            start_ee_pos=mid_pos,
-            start_ee_rot=mid_quat,
-            target_ee_pos=target_pos,
-            target_ee_rot=target_ee_rot,
-            seed_q=left[-1],
-            enforce_guard=enforce_guard,
-            remaining_depth=remaining_depth - 1,
-        )
-        if right is None:
-            return None
-
-        return left + right
 
     def _guard_ok(self, q6: np.ndarray, seed6: np.ndarray) -> bool:
         max_abs, l2 = self._guard_metrics(q6, seed6)
@@ -446,48 +253,52 @@ class RB10Controller(Node):
         q /= n
         r_tgt = quaternion_matrix(q)[:3, :3]
 
-        seed_candidates = self._make_seed_candidates(seed6, p)
-        evaluated: List[IKCandidate] = []
-        for candidate_seed6 in seed_candidates:
-            solved = self._solve_candidate(candidate_seed6, seed6, p, r_tgt)
-            if solved is not None:
-                evaluated.append(solved)
-
-        if not evaluated:
-            self._ik_fail(
-                "TRAC-IK returned no solution",
-                f"target_pos={self._format_array(p)} | seeds={len(seed_candidates)}",
+        try:
+            result = self._tracik_solver.ik(
+                p,
+                r_tgt,
+                seed_jnt_values=np.asarray(seed6, dtype=float),
             )
+        except Exception as exc:
+            self._ik_fail("TRAC-IK exception", str(exc))
             return None
 
-        if enforce_guard:
-            guarded = [candidate for candidate in evaluated if candidate.guard_ok]
-            if not guarded:
-                best_any = min(
-                    evaluated,
-                    key=lambda candidate: (
-                        candidate.guard_l2_rad,
-                        candidate.guard_max_abs_rad,
-                        candidate.score,
-                    ),
-                )
-                self._ik_fail("TRAC-IK guard reject", self._candidate_summary(best_any))
-                return None
-            evaluated = guarded
+        if result is None:
+            self._ik_fail("TRAC-IK returned no solution", f"target_pos={self._format_array(p)}")
+            return None
 
-        best = min(evaluated, key=lambda candidate: candidate.score)
-        ang_err_deg = math.degrees(best.ang_err_rad)
+        try:
+            q6 = self._coerce_q6(result, name="q6")
+        except Exception as exc:
+            self._ik_fail("TRAC-IK returned invalid joint solution", str(exc))
+            return None
+
+        guard_max_abs_rad, guard_l2_rad = self._guard_metrics(q6, seed6)
+        if enforce_guard and not self._guard_ok(q6, seed6):
+            return None
+
+        T = self._fk_current_T_of(q6)
+        if T is None:
+            return np.asarray(q6, dtype=float).copy()
+
+        fk_pos = np.asarray(T[:3, 3], dtype=float)
+        fk_rot = np.asarray(T[:3, :3], dtype=float)
+        pos_err_m = float(np.linalg.norm(fk_pos - p))
+        ang_err_rad = _rot_angle_rad(r_tgt, fk_rot)
+        ang_err_deg = math.degrees(ang_err_rad)
         summary = (
-            f"seeds_tried={len(seed_candidates)} | candidates={len(evaluated)} | "
-            f"{self._candidate_summary(best)}"
+            f"target_pos={self._format_array(p)} | "
+            f"q={self._format_array(q6)} | "
+            f"guard_max={guard_max_abs_rad:.3f} rad | "
+            f"guard_l2={guard_l2_rad:.3f} rad"
         )
-        if (best.pos_err_m > self.accept_pos_err_m) or (ang_err_deg > self.accept_ang_err_deg):
+        if (pos_err_m > self.accept_pos_err_m) or (ang_err_deg > self.accept_ang_err_deg):
             if not self.allow_approximate:
                 self._ik_fail("TRAC-IK rejected approximate solution", summary)
                 return None
             self.get_logger().warn(f"TRAC-IK accepting approximate solution | {summary}")
 
-        return np.asarray(best.q6, dtype=float).copy()
+        return np.asarray(q6, dtype=float).copy()
 
     def compute_joint_path_from_pose_sequence(
         self,
@@ -582,9 +393,6 @@ class RB10Controller(Node):
         enforce_guard: bool = True,
         seed_q: Optional[Sequence[float]] = None,
         min_point_duration: float = 0.20,
-        start_ee_position: Optional[Sequence[float]] = None,
-        start_ee_rot: Optional[Sequence[float]] = None,
-        max_guard_refine_depth: Optional[int] = None,
     ) -> Optional[List[np.ndarray]]:
         if len(point_durations) != int(np.asarray(target_ee_positions).shape[0]):
             raise ValueError("point_durations length must match the number of target poses")
@@ -601,54 +409,24 @@ class RB10Controller(Node):
         if q_seed is None:
             return None
 
-        refine_depth = self.max_guard_refine_depth if max_guard_refine_depth is None else max(0, int(max_guard_refine_depth))
-
-        prev_pos: Optional[np.ndarray] = None
-        prev_rot: Optional[np.ndarray] = None
-        if start_ee_position is not None and start_ee_rot is not None:
-            prev_pos = np.asarray(start_ee_position, dtype=float).reshape(3)
-            prev_rot = _quat_normalize(start_ee_rot)
-        else:
-            T_seed = self._fk_current_T_of(q_seed)
-            if T_seed is not None:
-                prev_pos = np.asarray(T_seed[:3, 3], dtype=float)
-                prev_rot = np.asarray(quaternion_from_matrix(T_seed), dtype=float)
-
         q_path: List[np.ndarray] = []
-        durations_out: List[float] = []
         for i in range(pos.shape[0]):
-            if prev_pos is not None and prev_rot is not None and refine_depth > 0:
-                segment_q = self._solve_pose_segment_with_guard_refinement(
-                    start_ee_pos=prev_pos,
-                    start_ee_rot=prev_rot,
-                    target_ee_pos=pos[i],
-                    target_ee_rot=rot[i],
-                    seed_q=q_seed,
-                    enforce_guard=enforce_guard,
-                    remaining_depth=refine_depth,
-                )
-            else:
-                q_goal = self.compute_target_qpos_from_pose(
-                    pos[i],
-                    rot[i],
-                    enforce_guard=enforce_guard,
-                    seed_q=q_seed,
-                )
-                segment_q = None if q_goal is None else [np.asarray(q_goal, dtype=float)]
-
-            if segment_q is None:
+            q_goal = self.compute_target_qpos_from_pose(
+                pos[i],
+                rot[i],
+                enforce_guard=enforce_guard,
+                seed_q=q_seed,
+            )
+            if q_goal is None:
                 prev_reason = self.last_ik_fail or "unknown IK failure"
                 self._ik_fail(f"Sequence IK failed at index {i}", prev_reason)
                 return None
 
-            q_path.extend(segment_q)
-            dt = float(point_durations[i]) / float(len(segment_q))
-            durations_out.extend([dt] * len(segment_q))
-            q_seed = np.asarray(segment_q[-1], dtype=float)
-            prev_pos = np.asarray(pos[i], dtype=float)
-            prev_rot = _quat_normalize(rot[i])
+            q_goal = np.asarray(q_goal, dtype=float)
+            q_path.append(q_goal)
+            q_seed = q_goal
 
-        self.publish_joint_trajectory(q_path, durations_out, min_point_duration=min_point_duration)
+        self.publish_joint_trajectory(q_path, point_durations, min_point_duration=min_point_duration)
         return q_path
 
     def emergency_stop(self, timeout: float = 1.0, wait_for_service_sec: float = 0.5) -> bool:
