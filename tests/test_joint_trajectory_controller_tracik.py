@@ -114,6 +114,8 @@ def _install_fake_modules():
         next_exception = None
         next_fk_pos = np.zeros(3, dtype=float)
         next_fk_rot = np.eye(3, dtype=float)
+        result_fn = None
+        fk_fn = None
 
         def __init__(self, base_link_name, tip_link_name, urdf_path):
             self.base_link_name = base_link_name
@@ -132,11 +134,22 @@ def _install_fake_modules():
             )
             if self.__class__.next_exception is not None:
                 raise self.__class__.next_exception
+            if callable(self.__class__.result_fn):
+                result = self.__class__.result_fn(target_pos, target_rotmat, seed_jnt_values)
+                if result is None:
+                    return None
+                return np.asarray(result, dtype=float).copy()
             if self.__class__.next_result is None:
                 return None
             return np.asarray(self.__class__.next_result, dtype=float).copy()
 
         def fk(self, joint_values):
+            if callable(self.__class__.fk_fn):
+                pos, rot = self.__class__.fk_fn(joint_values)
+                return (
+                    np.asarray(pos, dtype=float).copy(),
+                    np.asarray(rot, dtype=float).copy(),
+                )
             return (
                 np.asarray(self.__class__.next_fk_pos, dtype=float).copy(),
                 np.asarray(self.__class__.next_fk_rot, dtype=float).copy(),
@@ -223,6 +236,8 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
         self.fake_classes["FakeTracIK"].next_exception = None
         self.fake_classes["FakeTracIK"].next_fk_pos = np.zeros(3, dtype=float)
         self.fake_classes["FakeTracIK"].next_fk_rot = np.eye(3, dtype=float)
+        self.fake_classes["FakeTracIK"].result_fn = None
+        self.fake_classes["FakeTracIK"].fk_fn = None
 
     def test_tracik_seed_and_rotation_matrix_are_used(self):
         self.fake_classes["FakeTracIK"].next_result = np.array([0.3, -0.1, 0.2, 0.4, -0.5, 0.6], dtype=float)
@@ -242,7 +257,8 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
         self.assertEqual(solver.base_link_name, "link0")
         self.assertEqual(solver.tip_link_name, "tcp")
         self.assertEqual(solver.urdf_path, "/tmp/rb10.urdf")
-        ik_call = solver.ik_calls[-1]
+        self.assertGreaterEqual(len(solver.ik_calls), 1)
+        ik_call = solver.ik_calls[0]
         np.testing.assert_allclose(ik_call["target_pos"], np.array([0.3, -0.2, 0.4], dtype=float))
         np.testing.assert_allclose(ik_call["seed_jnt_values"], np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=float))
         np.testing.assert_allclose(
@@ -273,6 +289,69 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
         self.assertIsNone(q_goal)
         self.assertIsNotNone(controller.last_ik_fail)
         self.assertIn("TRAC-IK returned no solution", controller.last_ik_fail)
+
+    def test_multi_seed_selects_better_heading_branch(self):
+        heading = math.atan2(0.3, 0.8)
+        self.fake_classes["FakeTracIK"].result_fn = (
+            lambda target_pos, target_rotmat, seed_jnt_values: np.asarray(seed_jnt_values, dtype=float).copy()
+        )
+
+        def _fk_for_joint_values(joint_values):
+            q = np.asarray(joint_values, dtype=float)
+            base_err = (float(q[0]) - heading + math.pi) % (2.0 * math.pi) - math.pi
+            z = 1.0 if abs(base_err) < 0.2 else 0.72
+            return np.array([0.8, 0.3, z], dtype=float), np.eye(3, dtype=float)
+
+        self.fake_classes["FakeTracIK"].fk_fn = _fk_for_joint_values
+
+        controller = self.module.RB10Controller(urdf_path="/tmp/rb10.urdf", wait_for_joint_state_sec=0.0)
+        controller._latest_positions = np.array([3.0, -0.2, -1.4, -1.7, 0.0, 1.4], dtype=float)
+
+        q_goal = controller.compute_target_qpos_from_pose(
+            np.array([0.8, 0.3, 1.0], dtype=float),
+            np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
+            enforce_guard=False,
+        )
+
+        self.assertIsNotNone(q_goal)
+        self.assertLess(abs(((float(q_goal[0]) - heading + math.pi) % (2.0 * math.pi)) - math.pi), 0.2)
+        solver = self.fake_classes["FakeTracIK"].instances[-1]
+        self.assertGreater(len(solver.ik_calls), 1)
+
+    def test_guard_can_recover_via_alternate_seed(self):
+        heading = 1.0
+
+        def _result_for_seed(target_pos, target_rotmat, seed_jnt_values):
+            seed = np.asarray(seed_jnt_values, dtype=float)
+            q = np.zeros(6, dtype=float)
+            if abs(float(seed[0]) - heading) < 0.2:
+                q[0] = 0.12
+            else:
+                q[0] = 3.0
+                q[1] = -2.6
+                q[2] = 2.1
+            return q
+
+        self.fake_classes["FakeTracIK"].result_fn = _result_for_seed
+        self.fake_classes["FakeTracIK"].fk_fn = (
+            lambda joint_values: (
+                np.array([math.cos(heading), math.sin(heading), 0.4], dtype=float),
+                np.eye(3, dtype=float),
+            )
+        )
+
+        controller = self.module.RB10Controller(urdf_path="/tmp/rb10.urdf", wait_for_joint_state_sec=0.0)
+        controller._latest_positions = np.zeros(6, dtype=float)
+
+        q_goal = controller.compute_target_qpos_from_pose(
+            np.array([math.cos(heading), math.sin(heading), 0.4], dtype=float),
+            np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
+            enforce_guard=True,
+        )
+
+        self.assertIsNotNone(q_goal)
+        self.assertLess(abs(float(q_goal[0]) - 0.12), 1e-9)
+        self.assertIsNone(controller.last_ik_fail)
 
     def test_fk_uses_tracik_fk(self):
         self.fake_classes["FakeTracIK"].next_fk_pos = np.array([0.4, 0.1, 0.2], dtype=float)

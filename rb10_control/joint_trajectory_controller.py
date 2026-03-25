@@ -12,6 +12,8 @@ while still supporting the legacy script entrypoint in
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -45,6 +47,13 @@ URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb1
 MAX_STEP_PER_JOINT_RAD = 0.25
 MAX_STEP_L2_RAD = 0.45
 
+# TRAC-IK 후보 선택
+IK_SCORE_ANG_WEIGHT_M = 0.03
+IK_ACCEPT_POS_ERR_M = 0.015
+IK_ACCEPT_ANG_ERR_DEG = 7.5
+IK_ALLOW_APPROXIMATE = True
+IK_BASE_SEED_OFFSETS_RAD = (0.0, math.pi, -math.pi)
+
 # 디버그 토글
 DEBUG = False
 
@@ -60,6 +69,25 @@ def _fk_pose_to_matrix(pos_fk: Sequence[float], rot_fk: Sequence[Sequence[float]
     return T
 
 
+def _rot_angle_rad(r_target: np.ndarray, r_actual: np.ndarray) -> float:
+    r_delta = np.asarray(r_target, dtype=float).T @ np.asarray(r_actual, dtype=float)
+    trace = float(np.trace(r_delta))
+    cos_theta = max(-1.0, min(1.0, 0.5 * (trace - 1.0)))
+    return float(math.acos(cos_theta))
+
+
+@dataclass
+class IKCandidate:
+    seed6: np.ndarray
+    q6: np.ndarray
+    pos_err_m: float
+    ang_err_rad: float
+    score: float
+    guard_max_abs_rad: float
+    guard_l2_rad: float
+    guard_ok: bool
+
+
 class RB10Controller(Node):
     """BASE(frame) 기준 pos(3) + quat(xyzw) -> IK -> JointTrajectory publish."""
 
@@ -72,6 +100,11 @@ class RB10Controller(Node):
         jtc_topic: str = JTC_TOPIC,
         task_stop_service: str = TASK_STOP_SERVICE,
         wait_for_joint_state_sec: float = 5.0,
+        score_ang_weight_m: float = IK_SCORE_ANG_WEIGHT_M,
+        accept_pos_err_m: float = IK_ACCEPT_POS_ERR_M,
+        accept_ang_err_deg: float = IK_ACCEPT_ANG_ERR_DEG,
+        allow_approximate: bool = IK_ALLOW_APPROXIMATE,
+        base_seed_offsets_rad: Sequence[float] = IK_BASE_SEED_OFFSETS_RAD,
     ):
         super().__init__("rb10_controller")
 
@@ -81,6 +114,11 @@ class RB10Controller(Node):
         self.joint_states_topic = str(joint_states_topic)
         self.jtc_topic = str(jtc_topic)
         self.task_stop_service = str(task_stop_service)
+        self.score_ang_weight_m = float(score_ang_weight_m)
+        self.accept_pos_err_m = float(accept_pos_err_m)
+        self.accept_ang_err_deg = float(accept_ang_err_deg)
+        self.allow_approximate = bool(allow_approximate)
+        self.base_seed_offsets_rad = tuple(float(value) for value in base_seed_offsets_rad)
 
         # 외부에서 확인 가능한 최근 IK 실패 사유
         self.last_ik_fail: Optional[str] = None
@@ -189,10 +227,108 @@ class RB10Controller(Node):
     def _wrap_pi(x: np.ndarray) -> np.ndarray:
         return (x + np.pi) % (2 * np.pi) - np.pi
 
+    @staticmethod
+    def _wrap_pi_scalar(value: float) -> float:
+        return float((value + math.pi) % (2.0 * math.pi) - math.pi)
+
+    @staticmethod
+    def _format_array(values: Sequence[float], precision: int = 4) -> str:
+        return np.array2string(np.asarray(values, dtype=float), precision=precision, suppress_small=False)
+
+    def _guard_metrics(self, q6: np.ndarray, seed6: np.ndarray) -> tuple[float, float]:
+        diffs = self._wrap_pi(np.asarray(q6, dtype=float) - np.asarray(seed6, dtype=float))
+        return float(np.max(np.abs(diffs))), float(np.linalg.norm(diffs))
+
+    def _make_seed_candidates(self, seed6: np.ndarray, target_pos: np.ndarray) -> List[np.ndarray]:
+        heading = math.atan2(float(target_pos[1]), float(target_pos[0]))
+        candidates: List[np.ndarray] = []
+        seen: set[tuple[float, ...]] = set()
+
+        def add_candidate(q6: Sequence[float]) -> None:
+            q = self._coerce_q6(q6, name="candidate_seed")
+            q = self._wrap_pi(q)
+            key = tuple(np.round(q, decimals=6).tolist())
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(q)
+
+        add_candidate(seed6)
+
+        for base_angle in (heading + offset for offset in self.base_seed_offsets_rad):
+            q = np.asarray(seed6, dtype=float).copy()
+            q[0] = self._wrap_pi_scalar(base_angle)
+            add_candidate(q)
+
+        zero_seed = np.zeros_like(seed6)
+        add_candidate(zero_seed)
+        q = zero_seed.copy()
+        q[0] = self._wrap_pi_scalar(heading)
+        add_candidate(q)
+        return candidates
+
+    def _solve_candidate(
+        self,
+        candidate_seed6: np.ndarray,
+        actual_seed6: np.ndarray,
+        target_pos: np.ndarray,
+        target_rotmat: np.ndarray,
+    ) -> Optional[IKCandidate]:
+        try:
+            result = self._tracik_solver.ik(
+                target_pos,
+                target_rotmat,
+                seed_jnt_values=np.asarray(candidate_seed6, dtype=float),
+            )
+        except Exception:
+            return None
+
+        if result is None:
+            return None
+
+        try:
+            q6 = self._coerce_q6(result, name="q6")
+        except Exception:
+            return None
+
+        T = self._fk_current_T_of(q6)
+        if T is None:
+            return None
+
+        fk_pos = np.asarray(T[:3, 3], dtype=float)
+        fk_rot = np.asarray(T[:3, :3], dtype=float)
+        pos_err_m = float(np.linalg.norm(fk_pos - target_pos))
+        ang_err_rad = _rot_angle_rad(target_rotmat, fk_rot)
+        guard_max_abs_rad, guard_l2_rad = self._guard_metrics(q6, actual_seed6)
+        guard_ok = (guard_max_abs_rad <= MAX_STEP_PER_JOINT_RAD) and (guard_l2_rad <= MAX_STEP_L2_RAD)
+        score = float(
+            pos_err_m
+            + (self.score_ang_weight_m * ang_err_rad)
+            + (1e-4 * guard_l2_rad)
+        )
+        return IKCandidate(
+            seed6=np.asarray(candidate_seed6, dtype=float).copy(),
+            q6=np.asarray(q6, dtype=float).copy(),
+            pos_err_m=pos_err_m,
+            ang_err_rad=ang_err_rad,
+            score=score,
+            guard_max_abs_rad=guard_max_abs_rad,
+            guard_l2_rad=guard_l2_rad,
+            guard_ok=guard_ok,
+        )
+
+    def _candidate_summary(self, candidate: IKCandidate) -> str:
+        return (
+            f"seed={self._format_array(candidate.seed6)} | "
+            f"q={self._format_array(candidate.q6)} | "
+            f"pos_err={candidate.pos_err_m:.4f} m | "
+            f"ang_err={math.degrees(candidate.ang_err_rad):.2f} deg | "
+            f"guard_max={candidate.guard_max_abs_rad:.3f} rad | "
+            f"guard_l2={candidate.guard_l2_rad:.3f} rad"
+        )
+
     def _guard_ok(self, q6: np.ndarray, seed6: np.ndarray) -> bool:
-        diffs = self._wrap_pi(q6 - seed6)
-        max_abs = float(np.max(np.abs(diffs)))
-        l2 = float(np.linalg.norm(diffs))
+        max_abs, l2 = self._guard_metrics(q6, seed6)
         if (max_abs > MAX_STEP_PER_JOINT_RAD) or (l2 > MAX_STEP_L2_RAD):
             self._ik_fail(f"Guard reject: Δq too large (max={max_abs:.3f} rad, L2={l2:.3f} rad)")
             return False
@@ -220,33 +356,48 @@ class RB10Controller(Node):
         q /= n
         r_tgt = quaternion_matrix(q)[:3, :3]
 
-        try:
-            result = self._tracik_solver.ik(
-                p,
-                r_tgt,
-                seed_jnt_values=np.asarray(seed6, dtype=float),
-            )
-        except Exception as e:
-            self._ik_fail("TRAC-IK exception", str(e))
-            return None
+        seed_candidates = self._make_seed_candidates(seed6, p)
+        evaluated: List[IKCandidate] = []
+        for candidate_seed6 in seed_candidates:
+            solved = self._solve_candidate(candidate_seed6, seed6, p, r_tgt)
+            if solved is not None:
+                evaluated.append(solved)
 
-        if result is None:
-            self._ik_fail("TRAC-IK returned no solution")
-            return None
-
-        q6 = np.asarray(result, dtype=float).reshape(-1)
-        if q6.shape[0] != len(JOINT_NAMES):
+        if not evaluated:
             self._ik_fail(
-                "TRAC-IK returned unexpected joint dimension",
-                f"got={q6.shape[0]} expected={len(JOINT_NAMES)}",
+                "TRAC-IK returned no solution",
+                f"target_pos={self._format_array(p)} | seeds={len(seed_candidates)}",
             )
             return None
-        if not np.all(np.isfinite(q6)):
-            self._ik_fail("TRAC-IK returned NaN/Inf")
-            return None
-        if enforce_guard and not self._guard_ok(q6, seed6):
-            return None
-        return q6
+
+        if enforce_guard:
+            guarded = [candidate for candidate in evaluated if candidate.guard_ok]
+            if not guarded:
+                best_any = min(
+                    evaluated,
+                    key=lambda candidate: (
+                        candidate.guard_l2_rad,
+                        candidate.guard_max_abs_rad,
+                        candidate.score,
+                    ),
+                )
+                self._ik_fail("TRAC-IK guard reject", self._candidate_summary(best_any))
+                return None
+            evaluated = guarded
+
+        best = min(evaluated, key=lambda candidate: candidate.score)
+        ang_err_deg = math.degrees(best.ang_err_rad)
+        summary = (
+            f"seeds_tried={len(seed_candidates)} | candidates={len(evaluated)} | "
+            f"{self._candidate_summary(best)}"
+        )
+        if (best.pos_err_m > self.accept_pos_err_m) or (ang_err_deg > self.accept_ang_err_deg):
+            if not self.allow_approximate:
+                self._ik_fail("TRAC-IK rejected approximate solution", summary)
+                return None
+            self.get_logger().warn(f"TRAC-IK accepting approximate solution | {summary}")
+
+        return np.asarray(best.q6, dtype=float).copy()
 
     def compute_joint_path_from_pose_sequence(
         self,
