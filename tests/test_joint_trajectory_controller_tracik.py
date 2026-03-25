@@ -108,25 +108,12 @@ def _install_fake_modules():
         def to_msg(self):
             return types.SimpleNamespace(seconds=self.seconds)
 
-    class FakeLink:
-        def __init__(self, name):
-            self.name = name
-
-    class FakeChain:
-        def __init__(self):
-            self.links = [FakeLink(v) for v in ["world", "base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3", "tcp"]]
-
-        @classmethod
-        def from_urdf_file(cls, urdf_path, base_elements=None, active_links_mask=None):
-            return cls()
-
-        def forward_kinematics(self, q_full):
-            return np.eye(4, dtype=float)
-
     class FakeTracIK:
         instances = []
         next_result = np.zeros(6, dtype=float)
         next_exception = None
+        next_fk_pos = np.zeros(3, dtype=float)
+        next_fk_rot = np.eye(3, dtype=float)
 
         def __init__(self, base_link_name, tip_link_name, urdf_path):
             self.base_link_name = base_link_name
@@ -149,6 +136,12 @@ def _install_fake_modules():
                 return None
             return np.asarray(self.__class__.next_result, dtype=float).copy()
 
+        def fk(self, joint_values):
+            return (
+                np.asarray(self.__class__.next_fk_pos, dtype=float).copy(),
+                np.asarray(self.__class__.next_fk_rot, dtype=float).copy(),
+            )
+
     fake_rclpy = types.ModuleType("rclpy")
     fake_rclpy.ok = lambda: False
     fake_rclpy.init = lambda *args, **kwargs: None
@@ -162,10 +155,6 @@ def _install_fake_modules():
 
     fake_rclpy_node = types.ModuleType("rclpy.node")
     fake_rclpy_node.Node = FakeNode
-
-    fake_ikpy = types.ModuleType("ikpy")
-    fake_ikpy_chain = types.ModuleType("ikpy.chain")
-    fake_ikpy_chain.Chain = FakeChain
 
     fake_trac_ik = types.ModuleType("trac_ik")
     fake_trac_ik.TracIK = FakeTracIK
@@ -200,8 +189,6 @@ def _install_fake_modules():
         "rclpy": fake_rclpy,
         "rclpy.duration": fake_rclpy_duration,
         "rclpy.node": fake_rclpy_node,
-        "ikpy": fake_ikpy,
-        "ikpy.chain": fake_ikpy_chain,
         "trac_ik": fake_trac_ik,
         "rbpodo_msgs": fake_rbpodo_msgs,
         "rbpodo_msgs.srv": fake_rbpodo_msgs_srv,
@@ -234,6 +221,8 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
         self.fake_classes["FakeTracIK"].instances.clear()
         self.fake_classes["FakeTracIK"].next_result = np.zeros(6, dtype=float)
         self.fake_classes["FakeTracIK"].next_exception = None
+        self.fake_classes["FakeTracIK"].next_fk_pos = np.zeros(3, dtype=float)
+        self.fake_classes["FakeTracIK"].next_fk_rot = np.eye(3, dtype=float)
 
     def test_tracik_seed_and_rotation_matrix_are_used(self):
         self.fake_classes["FakeTracIK"].next_result = np.array([0.3, -0.1, 0.2, 0.4, -0.5, 0.6], dtype=float)
@@ -284,6 +273,19 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
         self.assertIsNone(q_goal)
         self.assertIsNotNone(controller.last_ik_fail)
         self.assertIn("TRAC-IK returned no solution", controller.last_ik_fail)
+
+    def test_fk_uses_tracik_fk(self):
+        self.fake_classes["FakeTracIK"].next_fk_pos = np.array([0.4, 0.1, 0.2], dtype=float)
+        self.fake_classes["FakeTracIK"].next_fk_rot = np.eye(3, dtype=float)
+
+        controller = self.module.RB10Controller(urdf_path="/tmp/rb10.urdf", wait_for_joint_state_sec=0.0)
+        controller._latest_positions = np.array([0.1, -0.2, 0.3, -0.4, 0.5, -0.6], dtype=float)
+
+        T = controller._fk_current_T()
+
+        self.assertIsNotNone(T)
+        np.testing.assert_allclose(T[:3, 3], np.array([0.4, 0.1, 0.2], dtype=float))
+        np.testing.assert_allclose(T[:3, :3], np.eye(3, dtype=float))
 
 
 if __name__ == "__main__":

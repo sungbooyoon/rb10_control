@@ -6,11 +6,9 @@ Usage:
 """
 
 from .joint_trajectory_controller import (
-    ACTIVE_LINKS_MASK,
     BASE_LINK,
     DEBUG,
     EE_LINK,
-    IK_MAX_ITER,
     JOINT_NAMES,
     JOINT_STATES_TOPIC,
     JTC_TOPIC,
@@ -23,11 +21,9 @@ from .joint_trajectory_controller import (
 )
 
 __all__ = [
-    "ACTIVE_LINKS_MASK",
     "BASE_LINK",
     "DEBUG",
     "EE_LINK",
-    "IK_MAX_ITER",
     "JOINT_NAMES",
     "JOINT_STATES_TOPIC",
     "JTC_TOPIC",

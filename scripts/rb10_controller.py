@@ -12,11 +12,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from rb10_control.joint_trajectory_controller import (  # noqa: E402
-    ACTIVE_LINKS_MASK,
     BASE_LINK,
     DEBUG,
     EE_LINK,
-    IK_MAX_ITER,
     JOINT_NAMES,
     JOINT_STATES_TOPIC,
     JTC_TOPIC,
@@ -29,11 +27,9 @@ from rb10_control.joint_trajectory_controller import (  # noqa: E402
 )
 
 __all__ = [
-    "ACTIVE_LINKS_MASK",
     "BASE_LINK",
     "DEBUG",
     "EE_LINK",
-    "IK_MAX_ITER",
     "JOINT_NAMES",
     "JOINT_STATES_TOPIC",
     "JTC_TOPIC",

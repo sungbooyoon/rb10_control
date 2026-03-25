@@ -16,7 +16,6 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import rclpy
-from ikpy.chain import Chain
 try:
     from trac_ik import TracIK
 except ImportError:
@@ -42,16 +41,23 @@ JOINT_NAMES = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]
 
 URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb10_1300e_u.urdf"
 
-# FK/링크 인덱스 계산용 IKPy active mask (fixed=False, 가동조인트=True, 최종 tcp는 프레임만 포함하므로 False)
-ACTIVE_LINKS_MASK = [False, True, True, True, True, True, True, False]
-
 # 안전가드
 MAX_STEP_PER_JOINT_RAD = 0.25
 MAX_STEP_L2_RAD = 0.45
-IK_MAX_ITER = 80
 
 # 디버그 토글
 DEBUG = False
+
+
+def _fk_pose_to_matrix(pos_fk: Sequence[float], rot_fk: Sequence[Sequence[float]]) -> np.ndarray:
+    pos = np.asarray(pos_fk, dtype=float).reshape(3)
+    rot = np.asarray(rot_fk, dtype=float).reshape(3, 3)
+    if not np.all(np.isfinite(pos)) or not np.all(np.isfinite(rot)):
+        raise ValueError("FK returned NaN/Inf")
+    T = np.eye(4, dtype=float)
+    T[:3, :3] = rot
+    T[:3, 3] = pos
+    return T
 
 
 class RB10Controller(Node):
@@ -93,32 +99,6 @@ class RB10Controller(Node):
                 "TRAC-IK backend requires the Python package 'trac_ik'. "
                 "Install it in the sourced ROS environment first."
             )
-
-        # FK/링크 인덱스 계산용 IKPy 체인 (full: fixed 포함, active mask 적용)
-        self.chain = Chain.from_urdf_file(
-            self.urdf_path,
-            base_elements=[self.base_link],
-            active_links_mask=ACTIVE_LINKS_MASK,
-        )
-
-        # IKPy 링크 이름/인덱스
-        self._link_names: List[str] = [lk.name for lk in self.chain.links]
-        self._name2idx = {n: i for i, n in enumerate(self._link_names)}
-
-        # JOINT_NAMES -> IKPy 인덱스 매핑
-        try:
-            self._idx6 = np.array([self._name2idx[n] for n in JOINT_NAMES], dtype=int)
-        except KeyError as e:
-            raise RuntimeError(f"URDF/IKPy 체인에 '{e.args[0]}' 조인트가 없습니다. JOINT_NAMES/URDF를 맞춰주세요.")
-
-        tip_name = self.get_chain_tip_link_name()
-        if tip_name != self.ee_link:
-            self.get_logger().warn(
-                f"IKPy chain tip is '{tip_name}', expected EE_LINK '{self.ee_link}'. "
-                "URDF/EE_LINK 설정을 확인하세요."
-            )
-        elif DEBUG:
-            self.get_logger().info(f"IKPy chain tip verified: {tip_name}")
 
         try:
             self._tracik_solver = TracIK(
@@ -164,15 +144,6 @@ class RB10Controller(Node):
                 q[k] = msg.position[idx]
         self._latest_positions = q
 
-    # ---------- q6 <-> q_full ----------
-    def _q_full_from_q6(self, q6: np.ndarray) -> np.ndarray:
-        q_full = np.zeros(len(self._link_names), dtype=float)
-        q_full[self._idx6] = q6
-        return q_full
-
-    def _q6_from_q_full(self, q_full: np.ndarray) -> np.ndarray:
-        return q_full[self._idx6].astype(float, copy=False)
-
     def _coerce_q6(self, q6: Sequence[float], name: str = "q6") -> np.ndarray:
         q = np.asarray(q6, dtype=float).reshape(-1)
         if q.shape[0] != len(JOINT_NAMES):
@@ -198,8 +169,8 @@ class RB10Controller(Node):
         if self._latest_positions is None:
             return None
         try:
-            q_full = self._q_full_from_q6(self._latest_positions)
-            return np.asarray(self.chain.forward_kinematics(q_full), dtype=float)
+            pos_fk, rot_fk = self._tracik_solver.fk(np.asarray(self._latest_positions, dtype=float))
+            return _fk_pose_to_matrix(pos_fk, rot_fk)
         except Exception as e:
             if DEBUG:
                 self.get_logger().warn(f"FK 실패: {e}")
@@ -207,8 +178,9 @@ class RB10Controller(Node):
 
     def _fk_current_T_of(self, q6: np.ndarray) -> Optional[np.ndarray]:
         try:
-            q_full = self._q_full_from_q6(q6)
-            return np.asarray(self.chain.forward_kinematics(q_full), dtype=float)
+            q = self._coerce_q6(q6, name="q6")
+            pos_fk, rot_fk = self._tracik_solver.fk(q)
+            return _fk_pose_to_matrix(pos_fk, rot_fk)
         except Exception:
             return None
 
@@ -419,9 +391,7 @@ class RB10Controller(Node):
 
     # ---------- 상태 조회 ----------
     def get_chain_tip_link_name(self) -> str:
-        if len(self._link_names) <= 0:
-            return ""
-        return str(self._link_names[-1])
+        return str(self.ee_link)
 
     def get_current_joint_positions(self) -> Optional[np.ndarray]:
         if self._latest_positions is None:
@@ -478,11 +448,9 @@ def main() -> None:
 
 
 __all__ = [
-    "ACTIVE_LINKS_MASK",
     "BASE_LINK",
     "DEBUG",
     "EE_LINK",
-    "IK_MAX_ITER",
     "JOINT_NAMES",
     "JOINT_STATES_TOPIC",
     "JTC_TOPIC",
