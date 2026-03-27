@@ -356,6 +356,24 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
             np.array([3.0, -0.2, -1.4, -1.7, 0.0, 1.4], dtype=float),
         )
 
+    def test_ik_solution_is_aligned_to_seed_branch_before_publish(self):
+        self.fake_classes["FakeTracIK"].next_result = np.array([-3.10, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
+        self.fake_classes["FakeTracIK"].next_fk_pos = np.array([0.8, 0.3, 0.4], dtype=float)
+        self.fake_classes["FakeTracIK"].next_fk_rot = np.eye(3, dtype=float)
+
+        controller = self.module.RB10Controller(urdf_path="/tmp/rb10.urdf", wait_for_joint_state_sec=0.0)
+        controller._latest_positions = np.array([3.12, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
+
+        q_goal = controller.compute_target_qpos_from_pose(
+            np.array([0.8, 0.3, 0.4], dtype=float),
+            np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
+            enforce_guard=True,
+        )
+
+        self.assertIsNotNone(q_goal)
+        self.assertGreater(float(q_goal[0]), 3.0)
+        self.assertLess(abs(float(q_goal[0] - controller._latest_positions[0])), 0.1)
+
     def test_guard_rejects_large_single_seed_step(self):
         self.fake_classes["FakeTracIK"].next_result = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
 

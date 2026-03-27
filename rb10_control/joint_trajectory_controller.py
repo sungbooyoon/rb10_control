@@ -213,6 +213,13 @@ class RB10Controller(Node):
         diffs = self._wrap_pi(np.asarray(q6, dtype=float) - np.asarray(seed6, dtype=float))
         return float(np.max(np.abs(diffs))), float(np.linalg.norm(diffs))
 
+    def _align_joint_branch_to_seed(self, q6: np.ndarray, seed6: np.ndarray) -> np.ndarray:
+        q = self._coerce_q6(q6, name="q6")
+        seed = self._coerce_q6(seed6, name="seed6")
+        # Keep the IK solution on the joint branch nearest to the current seed so
+        # the published command matches the guard's wrapped delta.
+        return seed + self._wrap_pi(q - seed)
+
     def _guard_ok(self, q6: np.ndarray, seed6: np.ndarray) -> bool:
         max_abs, l2 = self._guard_metrics(q6, seed6)
         if (max_abs > MAX_STEP_PER_JOINT_RAD) or (l2 > MAX_STEP_L2_RAD):
@@ -273,6 +280,8 @@ class RB10Controller(Node):
         except Exception as exc:
             self._ik_fail("TRAC-IK returned invalid joint solution", str(exc))
             return None
+
+        q6 = self._align_joint_branch_to_seed(q6, seed6)
 
         if not self._soft_limits_ok(q6):
             return None
