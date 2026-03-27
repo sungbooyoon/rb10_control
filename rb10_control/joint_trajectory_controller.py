@@ -45,6 +45,7 @@ URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb1
 # 안전가드
 MAX_STEP_PER_JOINT_RAD = 0.27
 MAX_STEP_L2_RAD = 0.45
+SHOULDER_SOFT_LIMIT_RAD = 0.5 * math.pi
 
 # TRAC-IK 잔차 허용치
 IK_ACCEPT_POS_ERR_M = 0.015
@@ -219,6 +220,18 @@ class RB10Controller(Node):
             return False
         return True
 
+    def _soft_limits_ok(self, q6: np.ndarray) -> bool:
+        shoulder_index = JOINT_NAMES.index("shoulder")
+        shoulder = float(np.asarray(q6, dtype=float)[shoulder_index])
+        limit = float(SHOULDER_SOFT_LIMIT_RAD)
+        if shoulder < -limit or shoulder > limit:
+            self._ik_fail(
+                "Soft joint limit reject",
+                f"shoulder={shoulder:.3f} rad outside [{-limit:.3f}, {limit:.3f}]",
+            )
+            return False
+        return True
+
     # ---------- IK ----------
     def compute_target_qpos_from_pose(
         self,
@@ -259,6 +272,9 @@ class RB10Controller(Node):
             q6 = self._coerce_q6(result, name="q6")
         except Exception as exc:
             self._ik_fail("TRAC-IK returned invalid joint solution", str(exc))
+            return None
+
+        if not self._soft_limits_ok(q6):
             return None
 
         if enforce_guard and not self._guard_ok(q6, seed6):
