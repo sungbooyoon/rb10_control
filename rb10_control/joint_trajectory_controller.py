@@ -13,6 +13,7 @@ while still supporting the legacy script entrypoint in
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -50,9 +51,24 @@ MAX_STEP_L2_RAD = 0.45
 IK_ACCEPT_POS_ERR_M = 0.015
 IK_ACCEPT_ANG_ERR_DEG = 7.5
 IK_ALLOW_APPROXIMATE = True
+IK_SCORE_ANG_WEIGHT_M = 0.03
+IK_BASE_SEED_OFFSETS_RAD = (0.0, math.pi, -math.pi)
 
 # 디버그 토글
 DEBUG = False
+
+
+@dataclass
+class IKCandidate:
+    seed6: np.ndarray
+    q6: np.ndarray
+    pos_err_m: float
+    ang_err_rad: float
+    score: float
+    guard_max_abs_rad: float
+    guard_l2_rad: float
+    guard_ok: bool
+    has_fk: bool
 
 
 def _fk_pose_to_matrix(pos_fk: Sequence[float], rot_fk: Sequence[Sequence[float]]) -> np.ndarray:
@@ -79,6 +95,30 @@ def _quat_normalize(quat_xyzw: Sequence[float]) -> np.ndarray:
     if not np.isfinite(norm) or norm <= 0.0:
         raise ValueError("Invalid quaternion: norm is zero or NaN")
     return q / norm
+
+
+def _quat_slerp_xyzw(q0: Sequence[float], q1: Sequence[float], alpha: float) -> np.ndarray:
+    qa = _quat_normalize(q0)
+    qb = _quat_normalize(q1)
+    dot = float(np.dot(qa, qb))
+    if dot < 0.0:
+        qb = -qb
+        dot = -dot
+
+    if dot > 0.9995:
+        out = qa + float(alpha) * (qb - qa)
+        return _quat_normalize(out)
+
+    theta_0 = math.acos(np.clip(dot, -1.0, 1.0))
+    sin_theta_0 = math.sin(theta_0)
+    if abs(sin_theta_0) < 1e-12:
+        return qa.copy()
+
+    theta = theta_0 * float(alpha)
+    sin_theta = math.sin(theta)
+    s0 = math.cos(theta) - dot * sin_theta / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+    return _quat_normalize((s0 * qa) + (s1 * qb))
 
 
 class RB10Controller(Node):
@@ -231,6 +271,177 @@ class RB10Controller(Node):
             return False
         return True
 
+    @staticmethod
+    def _wrap_pi_scalar(value: float) -> float:
+        return float((value + math.pi) % (2.0 * math.pi) - math.pi)
+
+    def _make_seed_candidates(self, seed6: np.ndarray, target_pos: np.ndarray) -> List[np.ndarray]:
+        heading = math.atan2(float(target_pos[1]), float(target_pos[0]))
+        candidates: List[np.ndarray] = []
+        seen: set[tuple[float, ...]] = set()
+
+        def add_candidate(q6: Sequence[float]) -> None:
+            q = self._coerce_q6(q6, name="seed_candidate")
+            q = self._wrap_pi(q)
+            key = tuple(np.round(q, decimals=6).tolist())
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(q)
+
+        add_candidate(seed6)
+
+        for offset in IK_BASE_SEED_OFFSETS_RAD:
+            q = np.asarray(seed6, dtype=float).copy()
+            q[0] = self._wrap_pi_scalar(heading + float(offset))
+            add_candidate(q)
+
+        zero_seed = np.zeros_like(seed6)
+        add_candidate(zero_seed)
+        zero_heading = zero_seed.copy()
+        zero_heading[0] = self._wrap_pi_scalar(heading)
+        add_candidate(zero_heading)
+
+        return candidates
+
+    def _solve_candidate(
+        self,
+        candidate_seed6: np.ndarray,
+        actual_seed6: np.ndarray,
+        target_pos: np.ndarray,
+        target_rotmat: np.ndarray,
+    ) -> tuple[Optional[IKCandidate], Optional[str]]:
+        try:
+            result = self._tracik_solver.ik(
+                target_pos,
+                target_rotmat,
+                seed_jnt_values=np.asarray(candidate_seed6, dtype=float),
+            )
+        except Exception as exc:
+            return None, f"TRAC-IK exception: {exc}"
+
+        if result is None:
+            return None, None
+
+        try:
+            q6 = self._coerce_q6(result, name="q6")
+        except Exception as exc:
+            return None, f"TRAC-IK returned invalid joint solution: {exc}"
+
+        guard_max_abs_rad, guard_l2_rad = self._guard_metrics(q6, actual_seed6)
+        guard_ok = (guard_max_abs_rad <= MAX_STEP_PER_JOINT_RAD) and (guard_l2_rad <= MAX_STEP_L2_RAD)
+
+        T = self._fk_current_T_of(q6)
+        has_fk = T is not None
+        pos_err_m = 0.0
+        ang_err_rad = 0.0
+        if has_fk:
+            fk_pos = np.asarray(T[:3, 3], dtype=float)
+            fk_rot = np.asarray(T[:3, :3], dtype=float)
+            pos_err_m = float(np.linalg.norm(fk_pos - target_pos))
+            ang_err_rad = _rot_angle_rad(target_rotmat, fk_rot)
+
+        score = float(
+            pos_err_m
+            + (IK_SCORE_ANG_WEIGHT_M * ang_err_rad)
+            + (1e-4 * guard_l2_rad)
+        )
+        return (
+            IKCandidate(
+                seed6=np.asarray(candidate_seed6, dtype=float).copy(),
+                q6=np.asarray(q6, dtype=float).copy(),
+                pos_err_m=pos_err_m,
+                ang_err_rad=ang_err_rad,
+                score=score,
+                guard_max_abs_rad=guard_max_abs_rad,
+                guard_l2_rad=guard_l2_rad,
+                guard_ok=guard_ok,
+                has_fk=has_fk,
+            ),
+            None,
+        )
+
+    def _candidate_summary(self, candidate: IKCandidate) -> str:
+        summary = (
+            f"seed={self._format_array(candidate.seed6)} | "
+            f"q={self._format_array(candidate.q6)} | "
+            f"guard_max={candidate.guard_max_abs_rad:.3f} rad | "
+            f"guard_l2={candidate.guard_l2_rad:.3f} rad"
+        )
+        if candidate.has_fk:
+            summary += (
+                f" | pos_err={candidate.pos_err_m:.4f} m"
+                f" | ang_err={math.degrees(candidate.ang_err_rad):.2f} deg"
+            )
+        return summary
+
+    def _interpolate_pose(
+        self,
+        start_pos: np.ndarray,
+        start_quat: np.ndarray,
+        end_pos: np.ndarray,
+        end_quat: np.ndarray,
+        alpha: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        pos = ((1.0 - float(alpha)) * np.asarray(start_pos, dtype=float)) + (float(alpha) * np.asarray(end_pos, dtype=float))
+        quat = _quat_slerp_xyzw(start_quat, end_quat, alpha)
+        return np.asarray(pos, dtype=float), np.asarray(quat, dtype=float)
+
+    def _refine_guard_failing_segment(
+        self,
+        start_ee_pos: np.ndarray,
+        start_ee_rot: np.ndarray,
+        target_ee_pos: np.ndarray,
+        target_ee_rot: np.ndarray,
+        duration: float,
+        seed_q: np.ndarray,
+        enforce_guard: bool,
+        remaining_depth: int,
+    ) -> Optional[tuple[List[np.ndarray], List[float]]]:
+        q_goal = self.compute_target_qpos_from_pose(
+            target_ee_pos,
+            target_ee_rot,
+            enforce_guard=enforce_guard,
+            seed_q=seed_q,
+        )
+        if q_goal is not None:
+            return [np.asarray(q_goal, dtype=float)], [float(duration)]
+
+        prev_reason = self.last_ik_fail or "unknown IK failure"
+        if remaining_depth <= 0 or "guard reject" not in prev_reason.lower():
+            return None
+
+        mid_pos, mid_rot = self._interpolate_pose(start_ee_pos, start_ee_rot, target_ee_pos, target_ee_rot, 0.5)
+        first_half = self._refine_guard_failing_segment(
+            start_ee_pos=start_ee_pos,
+            start_ee_rot=start_ee_rot,
+            target_ee_pos=mid_pos,
+            target_ee_rot=mid_rot,
+            duration=float(duration) * 0.5,
+            seed_q=np.asarray(seed_q, dtype=float),
+            enforce_guard=enforce_guard,
+            remaining_depth=remaining_depth - 1,
+        )
+        if first_half is None:
+            return None
+
+        first_q_path, first_durations = first_half
+        second_half = self._refine_guard_failing_segment(
+            start_ee_pos=mid_pos,
+            start_ee_rot=mid_rot,
+            target_ee_pos=target_ee_pos,
+            target_ee_rot=target_ee_rot,
+            duration=float(duration) * 0.5,
+            seed_q=np.asarray(first_q_path[-1], dtype=float),
+            enforce_guard=enforce_guard,
+            remaining_depth=remaining_depth - 1,
+        )
+        if second_half is None:
+            return None
+
+        second_q_path, second_durations = second_half
+        return first_q_path + second_q_path, first_durations + second_durations
+
     # ---------- IK ----------
     def compute_target_qpos_from_pose(
         self,
@@ -253,52 +464,42 @@ class RB10Controller(Node):
         q /= n
         r_tgt = quaternion_matrix(q)[:3, :3]
 
-        try:
-            result = self._tracik_solver.ik(
-                p,
-                r_tgt,
-                seed_jnt_values=np.asarray(seed6, dtype=float),
-            )
-        except Exception as exc:
-            self._ik_fail("TRAC-IK exception", str(exc))
+        evaluated: List[IKCandidate] = []
+        last_error: Optional[str] = None
+        for candidate_seed6 in self._make_seed_candidates(seed6, p):
+            candidate, error = self._solve_candidate(candidate_seed6, seed6, p, r_tgt)
+            if error is not None:
+                last_error = error
+            if candidate is not None:
+                evaluated.append(candidate)
+
+        if not evaluated:
+            extra = f"target_pos={self._format_array(p)}"
+            if last_error is not None:
+                extra = f"{extra} | {last_error}"
+            self._ik_fail("TRAC-IK returned no solution", extra)
             return None
 
-        if result is None:
-            self._ik_fail("TRAC-IK returned no solution", f"target_pos={self._format_array(p)}")
-            return None
-
-        try:
-            q6 = self._coerce_q6(result, name="q6")
-        except Exception as exc:
-            self._ik_fail("TRAC-IK returned invalid joint solution", str(exc))
-            return None
-
-        guard_max_abs_rad, guard_l2_rad = self._guard_metrics(q6, seed6)
-        if enforce_guard and not self._guard_ok(q6, seed6):
-            return None
-
-        T = self._fk_current_T_of(q6)
-        if T is None:
-            return np.asarray(q6, dtype=float).copy()
-
-        fk_pos = np.asarray(T[:3, 3], dtype=float)
-        fk_rot = np.asarray(T[:3, :3], dtype=float)
-        pos_err_m = float(np.linalg.norm(fk_pos - p))
-        ang_err_rad = _rot_angle_rad(r_tgt, fk_rot)
-        ang_err_deg = math.degrees(ang_err_rad)
-        summary = (
-            f"target_pos={self._format_array(p)} | "
-            f"q={self._format_array(q6)} | "
-            f"guard_max={guard_max_abs_rad:.3f} rad | "
-            f"guard_l2={guard_l2_rad:.3f} rad"
-        )
-        if (pos_err_m > self.accept_pos_err_m) or (ang_err_deg > self.accept_ang_err_deg):
-            if not self.allow_approximate:
-                self._ik_fail("TRAC-IK rejected approximate solution", summary)
+        if enforce_guard:
+            guarded = [candidate for candidate in evaluated if candidate.guard_ok]
+            if not guarded:
+                best_any = min(evaluated, key=lambda candidate: candidate.score)
+                self._ik_fail("TRAC-IK guard reject after multi-seed", self._candidate_summary(best_any))
                 return None
-            self.get_logger().warn(f"TRAC-IK accepting approximate solution | {summary}")
+            evaluated = guarded
 
-        return np.asarray(q6, dtype=float).copy()
+        best = min(evaluated, key=lambda candidate: candidate.score)
+        if best.has_fk:
+            ang_err_deg = math.degrees(best.ang_err_rad)
+            summary = self._candidate_summary(best)
+            if (best.pos_err_m > self.accept_pos_err_m) or (ang_err_deg > self.accept_ang_err_deg):
+                if not self.allow_approximate:
+                    self._ik_fail("TRAC-IK rejected approximate solution", summary)
+                    return None
+                self.get_logger().warn(f"TRAC-IK accepting approximate solution | {summary}")
+
+        self.last_ik_fail = None
+        return np.asarray(best.q6, dtype=float).copy()
 
     def compute_joint_path_from_pose_sequence(
         self,
@@ -393,6 +594,9 @@ class RB10Controller(Node):
         enforce_guard: bool = True,
         seed_q: Optional[Sequence[float]] = None,
         min_point_duration: float = 0.20,
+        start_ee_position: Optional[np.ndarray] = None,
+        start_ee_rot: Optional[np.ndarray] = None,
+        max_guard_refine_depth: int = 0,
     ) -> Optional[List[np.ndarray]]:
         if len(point_durations) != int(np.asarray(target_ee_positions).shape[0]):
             raise ValueError("point_durations length must match the number of target poses")
@@ -409,7 +613,19 @@ class RB10Controller(Node):
         if q_seed is None:
             return None
 
+        start_pos = None
+        start_quat = None
+        if start_ee_position is not None and start_ee_rot is not None:
+            start_pos = np.asarray(start_ee_position, dtype=float).reshape(3,)
+            start_quat = _quat_normalize(start_ee_rot)
+        else:
+            current_pose = self.get_current_ee_pose()
+            if current_pose is not None:
+                start_pos = np.asarray(current_pose[0], dtype=float).reshape(3,)
+                start_quat = _quat_normalize(current_pose[1])
+
         q_path: List[np.ndarray] = []
+        publish_durations: List[float] = []
         for i in range(pos.shape[0]):
             q_goal = self.compute_target_qpos_from_pose(
                 pos[i],
@@ -418,15 +634,41 @@ class RB10Controller(Node):
                 seed_q=q_seed,
             )
             if q_goal is None:
-                prev_reason = self.last_ik_fail or "unknown IK failure"
-                self._ik_fail(f"Sequence IK failed at index {i}", prev_reason)
-                return None
+                segment_start_pos = start_pos if i == 0 else pos[i - 1]
+                segment_start_rot = start_quat if i == 0 else rot[i - 1]
+                refined = None
+                if (
+                    int(max_guard_refine_depth) > 0
+                    and segment_start_pos is not None
+                    and segment_start_rot is not None
+                ):
+                    refined = self._refine_guard_failing_segment(
+                        start_ee_pos=np.asarray(segment_start_pos, dtype=float),
+                        start_ee_rot=np.asarray(segment_start_rot, dtype=float),
+                        target_ee_pos=pos[i],
+                        target_ee_rot=rot[i],
+                        duration=float(point_durations[i]),
+                        seed_q=np.asarray(q_seed, dtype=float),
+                        enforce_guard=enforce_guard,
+                        remaining_depth=int(max_guard_refine_depth),
+                    )
+                if refined is None:
+                    prev_reason = self.last_ik_fail or "unknown IK failure"
+                    self._ik_fail(f"Sequence IK failed at index {i}", prev_reason)
+                    return None
+
+                refined_q_path, refined_durations = refined
+                q_path.extend(np.asarray(q_refined, dtype=float) for q_refined in refined_q_path)
+                publish_durations.extend(float(duration) for duration in refined_durations)
+                q_seed = np.asarray(refined_q_path[-1], dtype=float)
+                continue
 
             q_goal = np.asarray(q_goal, dtype=float)
             q_path.append(q_goal)
+            publish_durations.append(float(point_durations[i]))
             q_seed = q_goal
 
-        self.publish_joint_trajectory(q_path, point_durations, min_point_duration=min_point_duration)
+        self.publish_joint_trajectory(q_path, publish_durations, min_point_duration=min_point_duration)
         return q_path
 
     def emergency_stop(self, timeout: float = 1.0, wait_for_service_sec: float = 0.5) -> bool:
