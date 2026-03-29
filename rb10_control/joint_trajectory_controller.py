@@ -45,7 +45,7 @@ URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb1
 # 안전가드
 MAX_STEP_PER_JOINT_RAD = 0.27
 MAX_STEP_L2_RAD = 0.45
-SHOULDER_SOFT_LIMIT_RAD = 0.5 * math.pi
+SHOULDER_SOFT_LIMIT_RAD = 0.4 * math.pi
 
 # TRAC-IK 잔차 허용치
 IK_ACCEPT_POS_ERR_M = 0.015
