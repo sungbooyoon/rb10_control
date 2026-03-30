@@ -46,6 +46,7 @@ URDF_PATH = "/home/sungboo/ros2_ws/src/rbpodo_ros2/rbpodo_description/robots/rb1
 MAX_STEP_PER_JOINT_RAD = 0.27
 MAX_STEP_L2_RAD = 0.45
 SHOULDER_SOFT_LIMIT_RAD = 0.4 * math.pi
+WRIST2_SOFT_LIMIT_RAD = 0.5 * math.pi
 
 # TRAC-IK 잔차 허용치
 IK_ACCEPT_POS_ERR_M = 0.015
@@ -230,11 +231,21 @@ class RB10Controller(Node):
     def _soft_limits_ok(self, q6: np.ndarray) -> bool:
         shoulder_index = JOINT_NAMES.index("shoulder")
         shoulder = float(np.asarray(q6, dtype=float)[shoulder_index])
-        limit = float(SHOULDER_SOFT_LIMIT_RAD)
-        if shoulder < -limit or shoulder > limit:
+        shoulder_limit = float(SHOULDER_SOFT_LIMIT_RAD)
+        if shoulder < -shoulder_limit or shoulder > shoulder_limit:
             self._ik_fail(
                 "Soft joint limit reject",
-                f"shoulder={shoulder:.3f} rad outside [{-limit:.3f}, {limit:.3f}]",
+                f"shoulder={shoulder:.3f} rad outside [{-shoulder_limit:.3f}, {shoulder_limit:.3f}]",
+            )
+            return False
+
+        wrist2_index = JOINT_NAMES.index("wrist2")
+        wrist2 = float(np.asarray(q6, dtype=float)[wrist2_index])
+        wrist2_limit = float(WRIST2_SOFT_LIMIT_RAD)
+        if wrist2 <= -wrist2_limit or wrist2 >= wrist2_limit:
+            self._ik_fail(
+                "Soft joint limit reject",
+                f"wrist2={wrist2:.3f} rad outside ({-wrist2_limit:.3f}, {wrist2_limit:.3f})",
             )
             return False
         return True

@@ -335,6 +335,23 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
         self.assertIn("Soft joint limit reject", controller.last_ik_fail)
         self.assertIn("shoulder=", controller.last_ik_fail)
 
+    def test_rejects_wrist2_soft_limit(self):
+        self.fake_classes["FakeTracIK"].next_result = np.array([0.3, 0.2, 0.1, 0.4, math.pi / 2.0, 0.6], dtype=float)
+
+        controller = self.module.RB10Controller(urdf_path="/tmp/rb10.urdf", wait_for_joint_state_sec=0.0)
+        controller._latest_positions = np.zeros(6, dtype=float)
+
+        q_goal = controller.compute_target_qpos_from_pose(
+            np.array([0.3, -0.2, 0.4], dtype=float),
+            np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
+            enforce_guard=False,
+        )
+
+        self.assertIsNone(q_goal)
+        self.assertIsNotNone(controller.last_ik_fail)
+        self.assertIn("Soft joint limit reject", controller.last_ik_fail)
+        self.assertIn("wrist2=", controller.last_ik_fail)
+
     def test_single_seed_ik_tries_once(self):
         self.fake_classes["FakeTracIK"].next_result = np.array([0.3, -0.1, 0.2, 0.4, -0.5, 0.6], dtype=float)
         self.fake_classes["FakeTracIK"].next_fk_pos = np.array([0.8, 0.3, 0.4], dtype=float)
@@ -495,7 +512,6 @@ class RB10ControllerTRACIKTests(unittest.TestCase):
         self.assertIsNotNone(T)
         np.testing.assert_allclose(T[:3, 3], np.array([0.4, 0.1, 0.2], dtype=float))
         np.testing.assert_allclose(T[:3, :3], np.eye(3, dtype=float))
-
 
 if __name__ == "__main__":
     unittest.main()
